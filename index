@@ -71,7 +71,13 @@ $defaultConfig = [
   'logo'          => '',
   'hero_mode'     => 'svg',
   'hero_image'    => '',
-  'catalog_desc'  => 'Каталог услуг нашей типографии и фотоцентра. Быстро, рядом, по-честным ценам. Нажмите «Заказать» или воспользуйтесь онлайн-калькулятором.',
+  'catalog_desc'  => 'Каталог услуг нашей типографии и фотоцентра. Быстро, рядом, по-честным ценам.',
+  'homepage_features' => [
+    'fast_photo' => true,
+    'online_payment' => true,
+    'delivery' => true,
+    'photo_constructor' => true
+  ],
   'seo' => [
     'title'       => 'Копировальный фотоцентр ПРИНТСС — типография | Фото 5 минут',
     'description' => 'Типография и фотоцентр: визитки, баннеры, листовки, фото на документы 5 минут. Красных Фортов, 49. Тел. +7 (952) 200-39-90',
@@ -90,11 +96,16 @@ $defaultConfig = [
     'account' => '',
   ],
   'yukassa' => [
-    'enabled'  => true,
+    'enabled'  => false,
     'shop_id'  => '',
     'secret_key' => '',
     'test_mode' => true,
-    'return_url' => $siteURL . '/payment_result.php',
+    'return_url' => $siteURL . '/oplata.php',
+    'services' => [
+      'products' => true,
+      'photo_constructor' => true,
+      'regular_orders' => false
+    ]
   ],
   'theme' => [
     'mode'         => 'light',
@@ -115,7 +126,7 @@ $defaultConfig = [
     'chat'    => ''
   ],
   'smtp' => [
-    'enabled' => false,
+    'enabled' => true,
     'host'    => 'smtp.mail.ru',
     'port'    => 465,
     'secure'  => 'ssl',
@@ -177,7 +188,7 @@ function save_upload_image($field, $uploadsDir){
 
 /* Email helpers */
 function parse_emails($s){
-  $s = str_replace([';',"\n","\r"],',',$s);
+  $s = str_replace([';','\n','\r'],',',$s);
   $parts = array_filter(array_map('trim', explode(',', (string)$s)));
   $out = [];
   foreach($parts as $p){
@@ -187,19 +198,19 @@ function parse_emails($s){
 }
 
 function email_headers($fromName, $from, $reply=null, $cc=null, $bcc=null){
-  $h  = "MIME-Version: 1.0\r\n";
-  $h .= "Content-Type: text/plain; charset=UTF-8\r\n";
-  $h .= "From: $fromName <$from>\r\n";
-  if ($reply) $h .= "Reply-To: $reply\r\n";
+  $h  = 'MIME-Version: 1.0\r\n';
+  $h .= 'Content-Type: text/plain; charset=UTF-8\r\n';
+  $h .= 'From: '.$fromName.' <'.$from.'>\r\n';
+  if ($reply) $h .= 'Reply-To: '.$reply.'\r\n';
   if ($cc){
     $ccs = is_array($cc) ? implode(', ',$cc) : $cc;
-    if($ccs) $h .= "Cc: $ccs\r\n";
+    if($ccs) $h .= 'Cc: '.$ccs.'\r\n';
   }
   if ($bcc){
     $bccs = is_array($bcc) ? implode(', ',$bcc) : $bcc;
-    if($bccs) $h .= "Bcc: $bccs\r\n";
+    if($bccs) $h .= 'Bcc: '.$bccs.'\r\n';
   }
-  $h .= "X-Priority: 1\r\nX-Mailer: SmartPrint\r\n";
+  $h .= 'X-Priority: 1\r\nX-Mailer: SmartPrint\r\n';
   return $h;
 }
 
@@ -210,9 +221,9 @@ function email_send_mail($to,$subj,$body,$fromName,$from,$reply=null,$cc=null,$b
 }
 
 function smtp_cmd($fp,$cmd,$expect=null){
-  if ($cmd !== null) fwrite($fp, $cmd."\r\n");
+  if ($cmd !== null) fwrite($fp, $cmd.'\r\n');
   $resp=''; while($line=fgets($fp, 515)){ $resp.=$line; if(isset($line[3])&&$line[3]===' ') break; }
-  if ($expect && strpos($resp,(string)$expect)!==0) throw new Exception("SMTP error: expected $expect, got: ".$resp);
+  if ($expect && strpos($resp,(string)$expect)!==0) throw new Exception('SMTP error: expected '.$expect.', got: '.$resp);
   return $resp;
 }
 
@@ -221,24 +232,24 @@ function email_send_smtp($to,$subj,$body,$fromName,$from,$smtp,$reply=null,$cc=n
   $ctx=stream_context_create(['ssl'=>['verify_peer'=>false,'verify_peer_name'=>false]]);
   $endpoint=(($secure==='ssl')?'ssl://':'tcp://').$host.':'.$port;
   $fp=@stream_socket_client($endpoint,$errno,$errstr,15,STREAM_CLIENT_CONNECT,$ctx);
-  if(!$fp) throw new Exception("SMTP connect failed: $errstr");
+  if(!$fp) throw new Exception('SMTP connect failed: '.$errstr);
   stream_set_timeout($fp,15);
   smtp_cmd($fp,null,220);
   smtp_cmd($fp,'EHLO localhost',250);
   if($secure==='tls'){ smtp_cmd($fp,'STARTTLS',220); if(!stream_socket_enable_crypto($fp,true,STREAM_CRYPTO_METHOD_TLS_CLIENT)) throw new Exception('STARTTLS failed'); smtp_cmd($fp,'EHLO localhost',250); }
   if (!empty($smtp['user'])){ smtp_cmd($fp,'AUTH LOGIN',334); smtp_cmd($fp,base64_encode($smtp['user']),334); smtp_cmd($fp,base64_encode($smtp['pass']),235); }
-  smtp_cmd($fp,"MAIL FROM:<$from>",250);
+  smtp_cmd($fp,'MAIL FROM:<'.$from.'>',250);
   $rcpts = [];
   foreach ((array)$to as $rcpt) $rcpts[]=$rcpt;
   foreach ((array)$cc as $rcpt) $rcpts[]=$rcpt;
   foreach ((array)$bcc as $rcpt) $rcpts[]=$rcpt;
   $rcpts = array_values(array_unique(array_filter($rcpts)));
-  foreach ($rcpts as $rcpt) smtp_cmd($fp,"RCPT TO:<$rcpt>",250);
+  foreach ($rcpts as $rcpt) smtp_cmd($fp,'RCPT TO:<'.$rcpt.'>',250);
   smtp_cmd($fp,'DATA',354);
   $data  = email_headers($fromName,$from,$reply,$cc,$bcc);
   $allToHeader = array_values(array_unique(array_merge((array)$to,(array)$cc)));
-  $data .= 'To: <'.(implode(', ',$allToHeader)).">\r\n";
-  $data .= 'Subject: =?UTF-8?B?'.base64_encode($subj)."?=\r\n\r\n".$body."\r\n.\r\n";
+  $data .= 'To: <'.(implode(', ',$allToHeader)).'>\r\n';
+  $data .= 'Subject: =?UTF-8?B?'.base64_encode($subj).'?=\r\n\r\n'.$body.'\r\n.\r\n';
   fwrite($fp,$data);
   $r=fgets($fp,515); if (strpos($r,'250')!==0) throw new Exception('SMTP DATA not accepted: '.$r);
   smtp_cmd($fp,'QUIT',221); fclose($fp); return true;
@@ -257,17 +268,17 @@ function send_email_all($cfg,$subject,$body){
 
   // Сначала пытаемся через SMTP если включен
   if (!empty($cfg['smtp']['enabled'])){
-    try{ 
-      email_send_smtp($to,$subject,$body,'SmartPrint',$from,$cfg['smtp'],$reply,$cc,$bcc); 
-      $ok=true; 
-    } catch(Throwable $e){ 
-      $errs[]='SMTP: '.$e->getMessage(); 
+    try{
+      email_send_smtp($to,$subject,$body,'SmartPrint',$from,$cfg['smtp'],$reply,$cc,$bcc);
+      $ok=true;
+    } catch(Throwable $e){
+      $errs[]='SMTP: '.$e->getMessage();
     }
   }
 
   // Если SMTP не сработал, пытаемся через mail()
-  if(!$ok){ 
-    $mailResult = email_send_mail($to,$subject,$body,'SmartPrint',$from,$reply,$cc,$bcc); 
+  if(!$ok){
+    $mailResult = email_send_mail($to,$subject,$body,'SmartPrint',$from,$reply,$cc,$bcc);
     if($mailResult) {
       $ok = true;
     } else {
@@ -280,7 +291,7 @@ function send_email_all($cfg,$subject,$body){
 
 /* Telegram API */
 function tg_api($token,$method,$params=[],$multipart=false){
-  $url="https://api.telegram.org/bot$token/$method";
+  $url='https://api.telegram.org/bot'.$token.'/'.$method;
   $ch=curl_init($url);
   curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);
   curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,10);
@@ -369,7 +380,7 @@ function yukassa_check_payment($cfg, $payment_id){
 
   if(!$shop_id || !$secret_key) return [false, 'Missing credentials'];
 
-  $url = "https://api.yookassa.ru/v3/payments/$payment_id";
+  $url = 'https://api.yookassa.ru/v3/payments/'.$payment_id;
 
   $ch = curl_init($url);
   curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -391,14 +402,14 @@ function yukassa_check_payment($cfg, $payment_id){
 
 /* Sitemap generation */
 function generate_sitemap($cfg) {
-  $sitemap = '<?xml version="1.0" encoding="UTF-8"?' . '>' . "\n";
-  $sitemap .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . "\n";
+  $sitemap = '<?xml version="1.0" encoding="UTF-8"?' . '>' . '\n';
+  $sitemap .= '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' . '\n';
 
-  $sitemap .= '<url><loc>' . esc($cfg['site']) . '</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>' . "\n";
+  $sitemap .= '<url><loc>' . esc($cfg['site']) . '</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>' . '\n';
 
-  $sections = ['catalog', 'calc', 'services', 'how', 'contacts', 'loyalty', 'reviews', 'portfolio', 'faq'];
+  $sections = ['catalog', 'calc', 'services', 'how', 'contacts', 'reviews', 'portfolio', 'faq'];
   foreach($sections as $section) {
-    $sitemap .= '<url><loc>' . esc($cfg['site']) . '/#' . $section . '</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>' . "\n";
+    $sitemap .= '<url><loc>' . esc($cfg['site']) . '/#' . $section . '</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>' . '\n';
   }
 
   $sitemap .= '</urlset>';
@@ -444,8 +455,8 @@ if (($_POST['mode']??'')==='callback') {
 
     [$mailOk,$mailErrs] = send_email_all($cfg, 'Обратный звонок — ' . $name, $body);
 
-    $tgMsg = '📞 <b>Обратный звонок</b>'."\n".'👤 '.esc($name)."\n".'📱 '.esc($phone)."\n"
-           . ($time ? '🕐 '.esc($time)."\n" : '')
+    $tgMsg = '📞 <b>Обратный звонок</b>'.'\n'.'👤 '.esc($name).'\n'.'📱 '.esc($phone).'\n'
+           . ($time ? '🕐 '.esc($time).'\n' : '')
            . "🌐 $siteURL";
     [$tgOk,$tgErr] = tg_send_message_cfg($cfg, $tgMsg);
 
@@ -499,11 +510,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
             . "IP: {$order['ip']}\n";
       [$mailOk,$mailErrs]=send_email_all($cfg,'Заявка — '.$service,$body);
 
-      $tgMsg = '🆕 <b>'.esc($service).'</b>'."\n".'👤 '.esc($name)."\n".'📞 '.esc($phone)."\n"
-             . ($price?'💰 '.esc($price)."\n":'')
-             . ($calc?'📐 '.esc($calc)."\n":'')
-             . ($comment?'💬 '.esc($comment)."\n":'')
-             . ($payment_method?'💳 Оплата: '.esc($payment_method)."\n":'')
+      $tgMsg = '🆕 <b>'.esc($service).'</b>'.'\n'.'👤 '.esc($name).'\n'.'📞 '.esc($phone).'\n'
+             . ($price?'💰 '.esc($price).'\n':'')
+             . ($calc?'📐 '.esc($calc).'\n':'')
+             . ($comment?'💬 '.esc($comment).'\n':'')
+             . ($payment_method?'💳 Оплата: '.esc($payment_method).'\n':'')
              . ($saved?"📎 Файл: $siteURL/uploads/$saved\n":'')
              . "🆔 $order_id\n"
              . "🌐 $siteURL";
@@ -610,14 +621,14 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
       [$mailOk,$mailErrs]=send_email_all($cfg,'Заказ корзины #'.$order_id,$emailBody);
 
       // Telegram уведомление
-      $tgMsg = '🛒 <b>Заказ товаров #'.esc($order_id).'</b>'."\n\n";
+      $tgMsg = '🛒 <b>Заказ товаров #'.esc($order_id).'</b>'.'\n\n';
       foreach($orderItems as $item){
-        $tgMsg .= '• '.esc($item['name']).' × '.$item['quantity'].' = '.number_format($item['total']).' ₽'."\n";
+        $tgMsg .= '• '.esc($item['name']).' × '.$item['quantity'].' = '.number_format($item['total']).' ₽'.'\n';
       }
-      $tgMsg .= "\n".'💰 <b>Итого: '.number_format($totalPrice).' ₽</b>'."\n\n";
-      $tgMsg .= '👤 '.esc($name)."\n".'📞 '.esc($phone)."\n";
-      if($comment) $tgMsg .= '💬 '.esc($comment)."\n";
-      $tgMsg .= '💳 '.($payment_method==='online'?'Онлайн оплата':'Оплата при получении')."\n";
+      $tgMsg .= '\n'.'💰 <b>Итого: '.number_format($totalPrice).' ₽</b>'.'\n\n';
+      $tgMsg .= '👤 '.esc($name).'\n'.'📞 '.esc($phone).'\n';
+      if($comment) $tgMsg .= '💬 '.esc($comment).'\n';
+      $tgMsg .= '💳 '.($payment_method==='online'?'Онлайн оплата':'Оплата при получении').'\n';
       $tgMsg .= "🌐 $siteURL";
 
       [$tgOk,$tgErr]=tg_send_message_cfg($cfg,$tgMsg);
@@ -676,7 +687,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
       [$mailOk,$mailErrs] = send_email_all($cfg, 'Новый отзыв — ' . $rating . '/5', $body);
 
       $stars = str_repeat('⭐', $rating);
-      $tgMsg = '📝 <b>Новый отзыв</b>'."\n".'👤 '.esc($name)."\n".$stars.' ('.$rating.'/5)'."\n".'"'.esc($text).'"';
+      $tgMsg = '📝 <b>Новый отзыв</b>'.'\n'.'👤 '.esc($name).'\n'.$stars.' ('.$rating.'/5)'.'\n'.'"'.esc($text).'"';
       [$tgOk,$tgErr] = tg_send_message_cfg($cfg, $tgMsg);
 
       echo json_encode([
@@ -705,7 +716,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
       if(isset($_POST[$f])) $new[$f]=trim($_POST[$f]);
     }
     if(isset($_POST['workhours'])){
-      $wh=array_filter(array_map('trim', explode("\n", str_replace("\r",'',$_POST['workhours']))));
+      $wh=array_filter(array_map('trim', explode('\n', str_replace('\r','',$_POST['workhours']))));
       if($wh) $new['workhours']=array_values($wh);
     }
     if(!empty($_POST['admin_pass'])) $new['admin_pass']=$_POST['admin_pass'];
@@ -743,6 +754,12 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
       if(isset($_POST['yukassa']['secret_key']) && $_POST['yukassa']['secret_key'] !== '__KEEP__') {
         $new['yukassa']['secret_key'] = $_POST['yukassa']['secret_key'];
       }
+
+      if(isset($_POST['yukassa']['services']) && is_array($_POST['yukassa']['services'])){
+        $new['yukassa']['services']['products'] = !empty($_POST['yukassa']['services']['products']);
+        $new['yukassa']['services']['photo_constructor'] = !empty($_POST['yukassa']['services']['photo_constructor']);
+        $new['yukassa']['services']['regular_orders'] = !empty($_POST['yukassa']['services']['regular_orders']);
+      }
     }
 
     $new['smtp']['enabled']=!empty($_POST['smtp_enabled']);
@@ -755,6 +772,12 @@ if ($_SERVER['REQUEST_METHOD']==='POST'){
     $new['telegram']['enabled']=!empty($_POST['tg_enabled']);
     $new['telegram']['token']=trim($_POST['tg_token']??$new['telegram']['token']);
     $new['telegram']['chat']=trim($_POST['tg_chat']??$new['telegram']['chat']);
+
+    // Отключаем систему лояльности принудительно
+    $new['features']['loyalty_program'] = false;
+    $new['features']['reviews_enabled'] = !empty($_POST['features_reviews_enabled']);
+    $new['features']['callback_widget'] = !empty($_POST['features_callback_widget']);
+    $new['features']['price_alerts'] = !empty($_POST['features_price_alerts']);
 
     if(isset($_POST['theme']) && is_array($_POST['theme'])){
       $t=$new['theme'];
@@ -1231,17 +1254,32 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
     img{max-width:100%;height:auto;display:block}
     a{color:inherit;text-decoration:none}
     .wrap{max-width:var(--container);margin:0 auto;padding:0 16px}
-    .topbar{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.75);backdrop-filter:blur(var(--glass-blur)) saturate(160%);border-bottom:1px solid rgba(0,0,0,.08)}
+
+    /* ОТКРЕПЛЕННАЯ ШАПКА */
+    .topbar{position:static;z-index:50;background:rgba(255,255,255,.75);backdrop-filter:blur(var(--glass-blur)) saturate(160%);border-bottom:1px solid rgba(0,0,0,.08)}
+
+    /* ТЕЛЕФОН ВЫШЕ МЕНЮ */
     .topflex{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;flex-wrap:wrap}
+
     .logo{display:flex;gap:12px;align-items:center;min-width:0}
     .logo-badge{width:44px;height:44px;border-radius:12px;background:var(--grad1);display:grid;place-items:center;color:#111;font-weight:900;flex:0 0 auto;overflow:hidden}
     .logo-title{font-weight:800;letter-spacing:.2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:55vw}
-    .nav{display:flex;gap:8px;flex-wrap:wrap}
-    .nav a{color:#2c4360;padding:8px 12px;border-radius:10px;font-weight:500;transition:all 0.2s}
-    .nav a:hover{background:rgba(0,0,0,.08);color:#1a2b45}
+    .phone{order:3}
     .phone a{background:var(--brand);color:#111;padding:10px 16px;border-radius:12px;font-weight:700;display:inline-block;border:2px solid rgba(0,0,0,.06);transition:all 0.2s}
     .phone a:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(255,138,0,.3)}
-    @media(max-width:560px){.phone a{width:100%;text-align:center}}
+
+    .nav{order:2;display:flex;gap:8px;flex-wrap:wrap;width:100%}
+    .nav a{color:#2c4360;padding:8px 12px;border-radius:10px;font-weight:500;transition:all 0.2s}
+    .nav a:hover{background:rgba(0,0,0,.08);color:#1a2b45}
+    @media(max-width:560px){
+      .phone a{width:100%;text-align:center}
+      .nav{overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; max-width:100%}
+      .nav a{flex:0 0 auto}
+      .topflex{flex-direction:column}
+      .phone{order:1;width:100%}
+      .nav{order:3}
+    }
+
     .hero{padding:clamp(24px,4vw,50px) 0 30px}
     .row{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
     .col-6{grid-column:span 6}.col-12{grid-column:span 12}
@@ -1300,10 +1338,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
     @media(max-width:980px){.calc-box{grid-template-columns:1fr}}
     .price-out{font-weight:800;font-size:clamp(18px,2.4vw,22px)}
     @media (max-width: 768px){.topbar{position: static; top: auto;}}
-    @media (max-width: 560px){
-      .nav{overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; max-width:100%}
-      .nav a{flex:0 0 auto}
-    }
     .payment-methods{margin:12px 0}
     .payment-option{display:flex;align-items:center;gap:10px;margin:8px 0}
     .payment-option input[type=radio]{margin:0;width:auto}
@@ -1404,31 +1438,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
       .discount-wheel{margin:0 auto}
       .discount-text h3{font-size:20px}
       .discount-text p{font-size:14px}
-    }
-
-    /* Система лояльности */
-    .loyalty-card{
-      background: linear-gradient(45deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      border-radius: var(--radius);
-      padding: 20px;
-      margin: 16px 0;
-      position: relative;
-      overflow: hidden;
-    }
-    .loyalty-card::before{
-      content: '';
-      position: absolute;
-      top: -50%;
-      right: -50%;
-      width: 100%;
-      height: 100%;
-      background: radial-gradient(circle, rgba(255,255,255,.1) 0%, transparent 70%);
-      animation: float 3s ease-in-out infinite alternate;
-    }
-    @keyframes float{
-      0%{transform:translateY(0)}
-      100%{transform:translateY(-10px)}
     }
 
     /* Отзывы */
@@ -1547,21 +1556,22 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
         <div class='muted' style='font-size:12px'><?=esc($cfg['slogan'])?></div>
       </div>
     </div>
+
+    <div class='phone'><a href='tel:<?=esc($cfg['phone_raw'])?>'><?=esc($cfg['phone_display'])?></a></div>
+
    <nav class='nav' aria-label='Навигация'>
   <a href='#catalog'>Каталог</a>
   <a href='#calc'>Калькулятор</a>
-  <a href='products.php'>🛍️ Товары</a>
+  <a href='produkt.php'>🛍️ Товары</a>
   <a href='https://принтсс.рф/photoconstructor.php' target='_blank'>Фото онлайн</a>
   <a href='https://printc47.ru/public/banner_calculator.html' target='_blank'>Кальк. баннеров</a>
   <a href='#services'>Услуги</a>
-  <a href='#loyalty'>Бонусы</a>
   <a href='#reviews'>Отзывы</a>
   <a href='http://портфол.принтсс.рф/' target='_blank'>Портфолио</a>
   <a href='#faq'>FAQ</a>
   <a href='#how'>Как заказать</a>
   <a href='#contacts'>Контакты</a>
 </nav>
-    <div class='phone'><a href='tel:<?=esc($cfg['phone_raw'])?>'><?=esc($cfg['phone_display'])?></a></div>
   </div>
 </header>
 
@@ -1633,29 +1643,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
               🎮 ИГРАТЬ
             </a>
           </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id='loyalty' class='wrap' style='padding:24px 0'>
-  <h2>💎 Система лояльности</h2>
-  <div class='loyalty-card'>
-    <div style='position:relative;z-index:2'>
-      <h3 style='margin:0 0 12px'>Накапливайте бонусы за каждый заказ!</h3>
-      <div class='row' style='align-items:center;margin-top:16px'>
-        <div>
-          <div style='font-size:18px;font-weight:600;margin-bottom:8px'>💰 1% с каждого заказа = бонусы</div>
-          <div style='opacity:0.9;margin-bottom:12px'>Бонусы можно тратить как деньги при следующих заказах</div>
-          <div style='display:flex;gap:12px;flex-wrap:wrap'>
-            <span class='badge' style='background:rgba(255,255,255,.2);color:white'>🎁 Приветственные 50 бонусов</span>
-            <span class='badge' style='background:rgba(255,255,255,.2);color:white'>🎂 Бонусы в день рождения</span>
-          </div>
-        </div>
-        <div style='text-align:center'>
-          <div style='font-size:48px;margin-bottom:8px'>🏆</div>
-          <button class='btn btn-brand' onclick='openLoyalty()'>Узнать баланс</button>
         </div>
       </div>
     </div>
@@ -1879,16 +1866,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
       <p>Конечно! Фото - 5 минут, баннеры - 2-4 часа, визитки - в тот же день. Срочность может увеличить стоимость на 30-50%.</p>
     </div>
   </div>
-
-  <div class='faq-item'>
-    <div class='faq-question' onclick='toggleFaq(this)'>
-      <span>Как накапливаются и тратятся бонусы?</span>
-      <span class='faq-toggle'>▼</span>
-    </div>
-    <div class='faq-answer'>
-      <p>За каждый заказ начисляется 1% бонусами. Потратить можно до 50% от суммы заказа. Баланс узнавайте по телефону или в чате.</p>
-    </div>
-  </div>
 </section>
 
 <section id='services' class='wrap features'>
@@ -1916,7 +1893,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
           <li>Доставка по городу и РФ</li>
           <li>Связь: телефон, WhatsApp, Telegram</li>
           <li>Бесплатные консультации</li>
-          <li>Система лояльности с бонусами</li>
           <li>Гарантия качества</li>
         </ul></div></div>
     </div>
@@ -2174,35 +2150,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
   </div>
 </dialog>
 
-<!-- Loyalty modal -->
-<dialog id='loyaltyModal'>
-  <form method='dialog'><div class='modal-head'><strong>💎 Система лояльности</strong><button class='btn' onclick='document.getElementById("loyaltyModal").close();return false;'>Закрыть ✕</button></div></form>
-  <div class='modal-body'>
-    <div style='text-align:center;margin-bottom:20px'>
-      <div style='font-size:48px;margin-bottom:8px'>🏆</div>
-      <h3 style='margin:0 0 8px'>Накапливайте бонусы!</h3>
-      <p class='muted'>За каждый заказ получайте 1% бонусами</p>
-    </div>
-
-    <div style='display:flex;gap:16px;margin:16px 0'>
-      <input type='tel' placeholder='+7 9xx xxx xx xx' style='flex:1' id='loyaltyPhone'>
-      <button class='btn btn-primary' onclick='checkLoyalty()'>Проверить баланс</button>
-    </div>
-
-    <div id='loyaltyResult' style='margin:16px 0'></div>
-
-    <div style='background:rgba(255,138,0,.1);padding:16px;border-radius:12px;margin:16px 0'>
-      <h4 style='margin:0 0 8px'>🎁 Как получить бонусы:</h4>
-      <ul style='margin:0;padding-left:20px'>
-        <li>1% с каждого заказа</li>
-        <li>50 бонусов при первом заказе</li>
-        <li>Бонусы в день рождения</li>
-        <li>Дополнительные бонусы за отзывы</li>
-      </ul>
-    </div>
-  </div>
-</dialog>
-
 <script>
   // ========== ОСНОВНЫЕ ФУНКЦИИ САЙТА ==========
   function openOrder(service, price, calcText){
@@ -2218,10 +2165,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
 
   function openReviewModal(){
     const m = document.getElementById('reviewModal'); if (m.showModal) m.showModal(); else m.setAttribute('open','open');
-  }
-
-  function openLoyalty(){
-    const m = document.getElementById('loyaltyModal'); if (m.showModal) m.showModal(); else m.setAttribute('open','open');
   }
 
   function showInfo(title){
@@ -2305,9 +2248,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
     if (message.includes('файл') || message.includes('формат') || message.includes('макет')) {
       return 'Принимаем: PDF, JPG, PNG, AI, PSD, CDR. Лучше PDF в CMYK, 300 dpi, с вылетами 2-3 мм. Проверяем макеты бесплатно!';
     }
-    if (message.includes('бонус') || message.includes('скидка')) {
-      return 'Система лояльности: 1% бонусами с каждого заказа + 50 бонусов при первом заказе. Проверить баланс можно по телефону!';
-    }
     return 'Понял! А вы знали, что наши специалисты готовы помочь 24/7? Звоните +7 (952) 200-39-90 или оформляйте заказ прямо на сайте!';
   }
 
@@ -2317,31 +2257,6 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
       sendChatMessage();
     }
   });
-
-  // Система лояльности
-  function checkLoyalty() {
-    const phone = document.getElementById('loyaltyPhone').value;
-    const result = document.getElementById('loyaltyResult');
-
-    if (!phone) {
-      result.innerHTML = '<div style="color:orange">Введите номер телефона</div>';
-      return;
-    }
-
-    // Имитация проверки
-    result.innerHTML = '<div style="color:var(--muted)">Проверяем баланс...</div>';
-
-    setTimeout(() => {
-      const bonuses = Math.floor(Math.random() * 500) + 50;
-      result.innerHTML = `
-        <div style="background:var(--card);padding:16px;border-radius:12px;text-align:center">
-          <div style="font-size:32px;color:var(--brand);font-weight:800">${bonuses}</div>
-          <div>бонусов на счету</div>
-          <div class="muted" style="margin-top:8px">Можно потратить до ${Math.floor(bonuses * 0.5)} ₽</div>
-        </div>
-      `;
-    }, 1500);
-  }
 
   // Калькулятор доставки
   function calculateDelivery() {
