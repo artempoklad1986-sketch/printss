@@ -13,6 +13,7 @@ $servicesFile = $BASE.'/services.json';
 $photoConfigFile = $BASE.'/photo_config.json';
 $chatLog = $BASE.'/chat_log.txt';
 $aiKnowledgeFile = $BASE.'/ai_knowledge.json';
+$customersFile = $BASE.'/customers.json';
 
 /* FS init */
 if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0775, true);
@@ -21,6 +22,7 @@ if (!file_exists($uploadsDir.'/.htaccess')) {
 }
 if (!file_exists($ordersLog)) @file_put_contents($ordersLog, '');
 if (!file_exists($chatLog)) @file_put_contents($chatLog, '');
+if (!file_exists($customersFile)) @file_put_contents($customersFile, json_encode([], JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
 
 /* Config */
 $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -73,7 +75,7 @@ $defaultConfig = [
     'shop_id'  => '',
     'secret_key' => '',
     'test_mode' => true,
-    'return_url' => $siteURL . '/payment_result.php',
+    'return_url' => $siteURL . '/oplata.php',
     'services' => [
       'products' => true,
       'photo_constructor' => true,
@@ -144,7 +146,7 @@ $services = json_decode(@file_get_contents($servicesFile), true) ?? $defaultServ
 $defaultPhotoConfig = [
   'enabled' => true,
   'max_photos' => 100,
-  'max_file_size' => 10, // MB
+  'max_file_size' => 10,
   'supported_formats' => ['jpg', 'jpeg', 'png', 'heic', 'heif'],
   'sizes' => [
     ['name' => '10×15', 'w' => 10, 'h' => 15, 'base' => 30, 'enabled' => true, 'popular' => true],
@@ -194,6 +196,9 @@ $photoConfig = json_decode(@file_get_contents($photoConfigFile), true);
 if (!is_array($photoConfig)) $photoConfig = $defaultPhotoConfig;
 $photoConfig = array_replace_recursive($defaultPhotoConfig, $photoConfig);
 
+// Загружаем клиентов для CRM
+$customers = json_decode(@file_get_contents($customersFile), true) ?? [];
+
 /* Helpers */
 function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8'); }
 function sanitize_text($s){ return trim(filter_var($s, FILTER_SANITIZE_FULL_SPECIAL_CHARS)); }
@@ -224,7 +229,7 @@ function log_order($path, $data){
 
 /* Telegram API */
 function tg_api($token,$method,$params=[],$multipart=false){
-  $url='https://api.telegram.org/bot$token/$method';
+  $url='https://api.telegram.org/bot'.$token.'/'.$method;
   $ch=curl_init($url);
   curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);
   curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,10);
@@ -240,6 +245,123 @@ function tg_api($token,$method,$params=[],$multipart=false){
 
 function require_admin($cfg){
   if(empty($_SESSION['is_admin'])){ header('Location: ?login=1'); exit; }
+}
+
+// =================== CRM ФУНКЦИИ ===================
+function update_customer_info($customersFile, $name, $phone, $email = '', $orderData = null) {
+  $customers = json_decode(@file_get_contents($customersFile), true) ?? [];
+
+  $phone_clean = preg_replace('/[^0-9]/', '', $phone);
+  $customer_id = $phone_clean;
+
+  $existingCustomer = null;
+  foreach ($customers as $key => $customer) {
+    if ($customer['id'] === $customer_id) {
+      $existingCustomer = $key;
+      break;
+    }
+  }
+
+  if ($existingCustomer !== null) {
+    $customers[$existingCustomer]['last_contact'] = date('Y-m-d H:i:s');
+    $customers[$existingCustomer]['orders_count']++;
+
+    if ($orderData) {
+      $customers[$existingCustomer]['total_spent'] += $orderData['total'] ?? 0;
+      $customers[$existingCustomer]['orders'][] = [
+        'id' => $orderData['id'],
+        'date' => date('Y-m-d H:i:s'),
+        'type' => $orderData['type'] ?? 'service',
+        'total' => $orderData['total'] ?? 0,
+        'status' => $orderData['status'] ?? 'new'
+      ];
+    }
+
+    if ($email) $customers[$existingCustomer]['email'] = $email;
+  } else {
+    $customers[] = [
+      'id' => $customer_id,
+      'name' => $name,
+      'phone' => $phone,
+      'email' => $email,
+      'created_at' => date('Y-m-d H:i:s'),
+      'last_contact' => date('Y-m-d H:i:s'),
+      'orders_count' => 1,
+      'total_spent' => $orderData['total'] ?? 0,
+      'notes' => '',
+      'tags' => [],
+      'orders' => $orderData ? [[
+        'id' => $orderData['id'],
+        'date' => date('Y-m-d H:i:s'),
+        'type' => $orderData['type'] ?? 'service',
+        'total' => $orderData['total'] ?? 0,
+        'status' => $orderData['status'] ?? 'new'
+      ]] : []
+    ];
+  }
+
+  @file_put_contents($customersFile, json_encode($customers, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
+}
+
+function get_order_statistics($ordersLog) {
+  $lines = @file($ordersLog, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) ?: [];
+  $stats = [
+    'total' => 0,
+    'today' => 0,
+    'this_week' => 0,
+    'this_month' => 0,
+    'photo_orders' => 0,
+    'cart_orders' => 0,
+    'service_orders' => 0,
+    'callback_requests' => 0,
+    'total_revenue' => 0,
+    'avg_order_value' => 0
+  ];
+
+  $today = date('Y-m-d');
+  $week_start = date('Y-m-d', strtotime('monday this week'));
+  $month_start = date('Y-m-01');
+  $revenue_orders = [];
+
+  foreach($lines as $line) {
+    if(!preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)) continue;
+    $ts = $m[1];
+    $j = json_decode($m[2], true);
+    if(!$j) continue;
+
+    // Пропускаем служебные записи
+    if (isset($j['action']) && $j['action'] === 'status_update') continue;
+    if (isset($j['updated_order'])) continue;
+
+    $stats['total']++;
+    $order_date = date('Y-m-d', strtotime($ts));
+
+    if($order_date === $today) $stats['today']++;
+    if($order_date >= $week_start) $stats['this_week']++;
+    if($order_date >= $month_start) $stats['this_month']++;
+
+    $type = $j['type'] ?? 'service';
+    if($type === 'photo_constructor') $stats['photo_orders']++;
+    elseif($type === 'cart') $stats['cart_orders']++;
+    elseif($type === 'callback') $stats['callback_requests']++;
+    else $stats['service_orders']++;
+
+    // Подсчет выручки
+    if(isset($j['total_price']) && $j['total_price'] > 0) {
+      $stats['total_revenue'] += $j['total_price'];
+      $revenue_orders[] = $j['total_price'];
+    }
+    elseif(isset($j['estimated_price']) && $j['estimated_price'] > 0) {
+      $stats['total_revenue'] += $j['estimated_price'];
+      $revenue_orders[] = $j['estimated_price'];
+    }
+  }
+
+  if(count($revenue_orders) > 0) {
+    $stats['avg_order_value'] = $stats['total_revenue'] / count($revenue_orders);
+  }
+
+  return $stats;
 }
 
 /* Обработка запросов */
@@ -258,6 +380,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
 
   require_admin($cfg);
+
+  // =================== ОБНОВЛЕНИЕ СТАТУСА ЗАКАЗА ===================
+  if (isset($_POST['update_order_status'])) {
+    $order_id = $_POST['order_id'] ?? '';
+    $new_status = $_POST['new_status'] ?? '';
+    $admin_notes = $_POST['admin_notes'] ?? '';
+
+    if ($order_id && $new_status) {
+      $update_data = [
+        'order_id' => $order_id,
+        'old_status' => $_POST['old_status'] ?? '',
+        'new_status' => $new_status,
+        'admin_notes' => $admin_notes,
+        'updated_by' => 'admin',
+        'updated_at' => date('Y-m-d H:i:s'),
+        'action' => 'status_update'
+      ];
+
+      log_order($ordersLog, $update_data);
+
+      header('Location: admin.php?tab=orders&order_updated=1');
+      exit;
+    }
+  }
+
+  // =================== ДОБАВЛЕНИЕ ЗАМЕТОК К КЛИЕНТУ ===================
+  if (isset($_POST['update_customer_notes'])) {
+    $customer_id = $_POST['customer_id'] ?? '';
+    $notes = $_POST['notes'] ?? '';
+    $tags = array_filter(array_map('trim', explode(',', $_POST['tags'] ?? '')));
+
+    if ($customer_id) {
+      $customers = json_decode(@file_get_contents($customersFile), true) ?? [];
+
+      foreach ($customers as $key => $customer) {
+        if ($customer['id'] === $customer_id) {
+          $customers[$key]['notes'] = $notes;
+          $customers[$key]['tags'] = $tags;
+          $customers[$key]['updated_at'] = date('Y-m-d H:i:s');
+          break;
+        }
+      }
+
+      @file_put_contents($customersFile, json_encode($customers, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
+
+      header('Location: admin.php?tab=orders&customer_updated=1');
+      exit;
+    }
+  }
 
   // Сохранение настроек фотоконструктора
   if (isset($_POST['save_photo_config'])){
@@ -390,9 +561,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     @file_put_contents($servicesFile, json_encode($newServices, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT));
     header('Location: admin.php?services_saved=1'); exit;
   }
-
-  // Остальные обработчики (admin_save, товары, etc.) остаются как в предыдущей версии...
-  // [Здесь весь код обработчиков из предыдущей версии]
 
   if (isset($_POST['admin_save'])){
     $new=$cfg;
@@ -606,23 +774,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
   if (isset($_POST['tg_use_chat'])){
     $chat = trim($_POST['chat']??'');
-    if ($chat!==''){ $cfg['telegram']['chat']=$chat; @file_put_contents($configFile, json_encode($cfg, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)); header('Location: admin.php?tg_chat=saved'); }
+    if ($chat!=='') { $cfg['telegram']['chat']=$chat; @file_put_contents($configFile, json_encode($cfg, JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT)); header('Location: admin.php?tg_chat=saved'); }
     else { header('Location: admin.php?tg_chat=err'); }
     exit;
   }
 }
 
 $isLogin = !isset($_SESSION['is_admin']);
+$stats = get_order_statistics($ordersLog);
 ?><!doctype html>
 <html lang='ru'>
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <title>Админ — <?=esc($cfg['brand'])?></title>
+  <title>Админ-панель — <?=esc($cfg['brand'])?></title>
   <style>
     :root{--bg:#0f1115;--panel:#151a22;--muted:#a7b0c0;--brand:#FFD400;--accent:#2D5BFF;--ok:#66e38a;--bad:#ff7a7a;--text:#e9eef7}
-    html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,Roboto;line-height:1.4}
-    .wrap{max-width:1300px;margin:0 auto;padding:16px}
+    html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,'Segoe UI',Arial,Roboto;line-height:1.4}
+    .wrap{max-width:1400px;margin:0 auto;padding:16px}
     .card{background:var(--panel);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:18px;margin-bottom:16px}
     .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     @media(max-width:980px){.row{grid-template-columns:1fr}}
@@ -649,6 +818,7 @@ $isLogin = !isset($_SESSION['is_admin']);
     .badge-success{background:#2ed573;color:#000}
     .badge-danger{background:#ff4757;color:#fff}
     .badge-warning{background:#ffa502;color:#000}
+    .badge-info{background:#3742fa;color:#fff}
     table{width:100%;border-collapse:collapse;margin-top:12px}
     th,td{padding:10px 8px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left;font-size:13px}
     th{background:rgba(255,255,255,.05);font-weight:600}
@@ -678,9 +848,12 @@ $isLogin = !isset($_SESSION['is_admin']);
     .alert-info{background:#1a2d4d;border:1px solid #2d5bff;color:#7aa7ff}
 
     .stats-bar{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-bottom:20px}
-    .stat-card{background:#1e2530;padding:16px;border-radius:10px;text-align:center}
+    .stat-card{background:#1e2530;padding:16px;border-radius:10px;text-align:center;border:1px solid rgba(255,255,255,.1)}
     .stat-number{font-size:24px;font-weight:700;color:var(--brand)}
-    .stat-label{font-size:12px;color:var(--muted);text-transform:uppercase}
+    .stat-label{font-size:12px;color:var(--muted);text-transform:uppercase;margin-top:4px}
+    .stat-change{font-size:11px;margin-top:4px}
+    .stat-up{color:var(--ok)}
+    .stat-down{color:var(--bad)}
     @media(max-width:768px){.stats-bar{grid-template-columns:repeat(2,1fr)}}
     @media(max-width:480px){.stats-bar{grid-template-columns:1fr}}
 
@@ -688,8 +861,8 @@ $isLogin = !isset($_SESSION['is_admin']);
     .service-controls{display:flex;gap:12px;align-items:center;margin-top:10px}
     .toggle{position:relative;display:inline-block;width:50px;height:24px}
     .toggle input{opacity:0;width:0;height:0}
-    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#ccc;transition:.4s;border-radius:24px}
-    .slider:before{position:absolute;content:"";height:18px;width:18px;left:3px;bottom:3px;background:white;transition:.4s;border-radius:50%}
+    .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#666;transition:.4s;border-radius:24px}
+    .slider:before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:white;transition:.4s;border-radius:50%}
     input:checked + .slider{background:var(--accent)}
     input:checked + .slider:before{transform:translateX(26px)}
 
@@ -700,27 +873,69 @@ $isLogin = !isset($_SESSION['is_admin']);
     .config-section{background:#252b3a;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:16px;margin-bottom:16px}
     .config-section h4{margin:0 0 12px;color:var(--brand)}
     .config-item{background:#1e2530;border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:12px;margin-bottom:8px;position:relative}
-    .config-item-header{display:flex;justify-content:between;align-items:center;margin-bottom:8px}
+    .config-item-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .remove-config-item{position:absolute;top:8px;right:8px;background:#ff4757;color:#fff;border:none;border-radius:4px;width:20px;height:20px;cursor:pointer;font-size:12px}
+
+    .crm-sidebar{position:fixed;right:-400px;top:0;width:400px;height:100vh;background:var(--panel);border-left:1px solid rgba(255,255,255,.15);transition:all 0.3s;z-index:1000;overflow-y:auto}
+    .crm-sidebar.open{right:0}
+    .crm-header{padding:16px;border-bottom:1px solid rgba(255,255,255,.15);display:flex;justify-content:space-between;align-items:center}
+    .crm-body{padding:16px}
+    .crm-close{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer}
+    .customer-info{background:#1e2530;padding:16px;border-radius:8px;margin-bottom:16px}
+    .customer-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+    .customer-tag{background:var(--accent);color:#fff;padding:2px 8px;border-radius:12px;font-size:11px}
+    .order-history{margin-top:16px}
+    .order-item{background:#1e2530;padding:12px;border-radius:6px;margin-bottom:8px;border-left:3px solid var(--brand)}
+
+    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:2000;align-items:center;justify-content:center}
+    .modal.show{display:flex}
+    .modal-content{background:var(--panel);border-radius:12px;width:90%;max-width:600px;max-height:90vh;overflow-y:auto}
+    .modal-header{padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.15);display:flex;justify-content:space-between;align-items:center}
+    .modal-body{padding:20px}
+    .close-modal{background:none;border:none;color:var(--muted);font-size:24px;cursor:pointer}
+
+    @media(max-width:768px){
+      .crm-sidebar{width:100vw;right:-100vw}
+      .wrap{padding:12px}
+      .stats-bar{gap:12px}
+      .form-row,.form-row-3{grid-template-columns:1fr}
+    }
+
+    .status-select{background:#1e2530;border:1px solid rgba(255,255,255,.15);color:#fff;padding:6px 8px;border-radius:4px;font-size:12px}
+    .order-actions{display:flex;gap:6px;margin-top:8px}
+    .order-notes{margin-top:12px;padding:12px;background:#1a1f28;border-radius:6px;font-size:12px}
+    .quick-actions{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
   </style>
   <meta name='robots' content='noindex,nofollow'>
 </head>
 <body>
   <div class='wrap'>
-    <h1>🏪 Админ — <?=esc($cfg['brand'])?></h1>
+    <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:16px'>
+      <h1>🏪 Админ-панель — <?=esc($cfg['brand'])?></h1>
+      <div class='flex'>
+        <a href='/' class='btn2' target='_blank'>🏠 Сайт</a>
+        <a href='produkt.php' class='btn2' target='_blank'>🛍️ Товары</a>
+        <a href='конструктор.php' class='btn2' target='_blank'>📸 Фотоконструктор</a>
+        <?php if(!empty($_SESSION['is_admin'])): ?>
+          <a href='?logout=1' class='btn-danger'>🚪 Выход</a>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <?php if (isset($_GET['logout'])){ session_destroy(); header('Location: admin.php'); exit; } ?>
 
     <?php if ($isLogin): ?>
       <div class='card'>
-        <h3>Вход</h3>
-        <?php if(isset($_GET['err'])): ?><div class='alert alert-danger'>Неверный пароль</div><?php endif; ?>
+        <h3>🔐 Авторизация</h3>
+        <?php if(isset($_GET['err'])): ?><div class='alert alert-danger'>❌ Неверный пароль</div><?php endif; ?>
         <form method='post'>
           <div class='form-group'>
-            <label>Пароль</label>
-            <input type='password' name='password' placeholder='Введите пароль администратора' required>
+            <label>Пароль администратора</label>
+            <input type='password' name='password' placeholder='Введите пароль' required autofocus>
           </div>
-          <button class='btn' name='admin_login' value='1'>Войти</button>
+          <button class='btn-success' name='admin_login' value='1'>🔓 Войти в систему</button>
         </form>
-        <div class='muted mini' style='margin-top:8px'>Пароль по умолчанию: <?=esc($cfg['admin_pass'])?></div>
+        <div class='muted mini' style='margin-top:12px'>Пароль по умолчанию: <code><?=esc($cfg['admin_pass'])?></code></div>
       </div>
     <?php else: ?>
 
@@ -730,194 +945,254 @@ $isLogin = !isset($_SESSION['is_admin']);
       <?php if (isset($_GET['photo_config_saved'])): ?><div class='alert alert-success'>✅ Настройки фотоконструктора сохранены!</div><?php endif; ?>
       <?php if (isset($_GET['product_saved'])): ?><div class='alert alert-success'>✅ Товар сохранен!</div><?php endif; ?>
       <?php if (isset($_GET['product_deleted'])): ?><div class='alert alert-success'>🗑️ Товар удален!</div><?php endif; ?>
+      <?php if (isset($_GET['order_updated'])): ?><div class='alert alert-success'>📦 Статус заказа обновлен!</div><?php endif; ?>
+      <?php if (isset($_GET['customer_updated'])): ?><div class='alert alert-success'>👤 Информация о клиенте обновлена!</div><?php endif; ?>
       <?php if (isset($_GET['error'])): ?><div class='alert alert-danger'>❌ <?=esc($_GET['error'])?></div><?php endif; ?>
-      <?php if (isset($_GET['err'])): ?><div class='alert alert-danger'>❌ <?=esc($_GET['err'])?></div><?php endif; ?>
 
       <!-- Статистика -->
       <div class='stats-bar'>
         <div class='stat-card'>
+          <div class='stat-number'><?=$stats['total']?></div>
+          <div class='stat-label'>Всего заказов</div>
+          <div class='stat-change stat-up'>+<?=$stats['today']?> сегодня</div>
+        </div>
+        <div class='stat-card'>
+          <div class='stat-number'><?=$stats['this_week']?></div>
+          <div class='stat-label'>За неделю</div>
+          <div class='stat-change muted'><?=$stats['this_month']?> за месяц</div>
+        </div>
+        <div class='stat-card'>
+          <div class='stat-number'><?=number_format($stats['total_revenue'], 0, ' ', ' ')?> ₽</div>
+          <div class='stat-label'>Выручка</div>
+          <div class='stat-change muted'>~<?=number_format($stats['avg_order_value'], 0, ' ', ' ')?> ₽ средний чек</div>
+        </div>
+        <div class='stat-card'>
+          <div class='stat-number'><?=count($customers)?></div>
+          <div class='stat-label'>Клиентов в базе</div>
+          <div class='stat-change muted'><?=$stats['callback_requests']?> звонков</div>
+        </div>
+        <div class='stat-card'>
           <div class='stat-number'><?=count($products)?></div>
           <div class='stat-label'>Товаров</div>
-        </div>
-        <div class='stat-card'>
-          <div class='stat-number'><?=count($services)?></div>
-          <div class='stat-label'>Услуг</div>
-        </div>
-        <div class='stat-card'>
-          <div class='stat-number'><?php
-            $lines = @file($ordersLog, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) ?: [];
-            $photoOrders = 0;
-            foreach($lines as $line){
-              if(preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)){
-                $j = json_decode($m[2], true);
-                if($j && ($j['type'] ?? '') === 'photo_constructor') $photoOrders++;
-              }
-            }
-            echo $photoOrders;
-          ?></div>
-          <div class='stat-label'>Фото заказов</div>
-        </div>
-        <div class='stat-card'>
-          <div class='stat-number'><?php
-            $productOrders = 0;
-            foreach($lines as $line){
-              if(preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)){
-                $j = json_decode($m[2], true);
-                if($j && ($j['type'] ?? '') === 'cart') $productOrders++;
-              }
-            }
-            echo $productOrders;
-          ?></div>
-          <div class='stat-label'>Заказов товаров</div>
-        </div>
-        <div class='stat-card'>
-          <div class='stat-number'><?php
-            $totalOrders = 0;
-            foreach($lines as $line){
-              if(preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)){
-                $j = json_decode($m[2], true);
-                if($j) $totalOrders++;
-              }
-            }
-            echo $totalOrders;
-          ?></div>
-          <div class='stat-label'>Всего заказов</div>
+          <div class='stat-change muted'><?=$stats['photo_orders']?> фото заказов</div>
         </div>
       </div>
 
       <!-- Вкладки -->
       <div class='tabs'>
-        <a href='#homepage' class='tab active' onclick='showTab("homepage",this)'>🏠 Главная</a>
-        <a href='#orders' class='tab' onclick='showTab("orders",this)'>📦 Заказы</a>
-        <a href='#photo-config' class='tab' onclick='showTab("photo-config",this)'>📸 Фотоконструктор</a>
-        <a href='#products' class='tab' onclick='showTab("products",this)'>🛍️ Товары</a>
-        <a href='#settings' class='tab' onclick='showTab("settings",this)'>⚙️ Основные</a>
-        <a href='#advanced' class='tab' onclick='showTab("advanced",this)'>🔧 Интеграции</a>
-        <a href='#design' class='tab' onclick='showTab("design",this)'>🎨 Дизайн</a>
-        <a href='products.php' class='btn' target='_blank'>👁️ Магазин</a>
-        <a href='photoconstructor.php' class='btn' target='_blank'>📸 Фотоконструктор</a>
-        <a href='/' class='btn2' target='_blank'>🏠 Главная</a>
+        <a href='#orders' class='tab <?=($_GET['tab']??'orders')==='orders'?'active':''?>' onclick='showTab("orders",this)'>📦 CRM и Заказы</a>
+        <a href='#photoconstructor' class='tab <?=($_GET['tab']??'')==='photoconstructor'?'active':''?>' onclick='showTab("photoconstructor",this)'>📸 Фотоконструктор</a>
+        <a href='#homepage' class='tab <?=($_GET['tab']??'')==='homepage'?'active':''?>' onclick='showTab("homepage",this)'>🏠 Главная</a>
+        <a href='#products' class='tab <?=($_GET['tab']??'')==='products'?'active':''?>' onclick='showTab("products",this)'>🛍️ Товары</a>
+        <a href='#settings' class='tab <?=($_GET['tab']??'')==='settings'?'active':''?>' onclick='showTab("settings",this)'>⚙️ Основные настройки</a>
+        <a href='#integrations' class='tab <?=($_GET['tab']??'')==='integrations'?'active':''?>' onclick='showTab("integrations",this)'>🔧 Интеграции</a>
+        <a href='#design' class='tab <?=($_GET['tab']??'')==='design'?'active':''?>' onclick='showTab("design",this)'>🎨 Дизайн</a>
       </div>
 
-      <!-- РАЗДЕЛ: Главная страница -->
-      <div id='tab-homepage' class='tab-content'>
+      <!-- РАЗДЕЛ: CRM и Заказы -->
+      <div id='tab-orders' class='tab-content' style='<?=($_GET['tab']??'orders')==='orders'?'':'display:none'?>'>
         <div class='card'>
-          <h3>🏠 Настройки главной страницы</h3>
-          <form method='post'>
-            <div class='form-row'>
-              <div class='form-group'>
-                <label>Название бренда</label>
-                <input name='brand' value='<?=esc($cfg['brand'])?>' placeholder='Копировальный фотоцентр ПРИНТСС'>
-              </div>
-              <div class='form-group'>
-                <label>Слоган</label>
-                <input name='slogan' value='<?=esc($cfg['slogan'])?>' placeholder='Печать в Сосновом Бору'>
-              </div>
+          <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px'>
+            <h3>📦 CRM-система управления заказами</h3>
+            <div class='quick-actions'>
+              <button class='btn2' onclick='exportOrders()'>📊 Экспорт</button>
+              <button class='btn2' onclick='filterOrders("new")'>🆕 Новые</button>
+              <button class='btn2' onclick='filterOrders("in_progress")'>⏳ В работе</button>
+              <button class='btn2' onclick='filterOrders("completed")'>✅ Готово</button>
             </div>
+          </div>
 
-            <div class='form-group'>
-              <label>Заголовок героя (главный призыв)</label>
-              <input name='hero' value='<?=esc($cfg['hero'])?>' placeholder='Фото на документы — 5 минут'>
-            </div>
+          <div class='orders-filter'>
+            <button class='filter-btn active' onclick='filterOrders("all")'>Все (<?=$stats['total']?>)</button>
+            <button class='filter-btn' onclick='filterOrders("cart")'>🛒 Товары (<?=$stats['cart_orders']?>)</button>
+            <button class='filter-btn' onclick='filterOrders("photo_constructor")'>📸 Фото (<?=$stats['photo_orders']?>)</button>
+            <button class='filter-btn' onclick='filterOrders("service")'>📋 Услуги (<?=$stats['service_orders']?>)</button>
+            <button class='filter-btn' onclick='filterOrders("callback")'>📞 Звонки (<?=$stats['callback_requests']?>)</button>
+          </div>
 
-            <div class='form-group'>
-              <label>Описание каталога услуг</label>
-              <textarea name='catalog_desc' rows='2'><?=esc($cfg['catalog_desc'])?></textarea>
-            </div>
+          <div style='overflow-x:auto'>
+            <table id='ordersTable'>
+              <thead>
+                <tr>
+                  <th>Время</th>
+                  <th>Тип</th>
+                  <th>Клиент</th>
+                  <th>Заказ</th>
+                  <th>Сумма</th>
+                  <th>Статус</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php
+                $lines = @file($ordersLog, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) ?: [];
+                $lines = array_slice(array_reverse($lines), 0, 200);
 
-            <h4>Функции главной страницы</h4>
-            <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 16px;'>
-              <div>
-                <label class='toggle'>
-                  <input type='checkbox' name='homepage_features[fast_photo]' <?=!empty($cfg['homepage_features']['fast_photo']) ? 'checked' : ''?>>
-                  <span class='slider'></span>
-                </label>
-                <span style='margin-left: 10px;'>⚡ Быстрое фото на документы</span>
-              </div>
+                foreach($lines as $line){
+                  if(!preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)) continue;
+                  $ts = $m[1];
+                  $j = json_decode($m[2], true);
+                  if (!$j) continue;
 
-              <div>
-                <label class='toggle'>
-                  <input type='checkbox' name='homepage_features[online_payment]' <?=!empty($cfg['homepage_features']['online_payment']) ? 'checked' : ''?>>
-                  <span class='slider'></span>
-                </label>
-                <span style='margin-left: 10px;'>💳 Онлайн оплата</span>
-              </div>
+                  // Пропускаем служебные записи
+                  if (isset($j['action']) && $j['action'] === 'status_update') continue;
+                  if (isset($j['updated_order'])) continue;
 
-              <div>
-                <label class='toggle'>
-                  <input type='checkbox' name='homepage_features[delivery]' <?=!empty($cfg['homepage_features']['delivery']) ? 'checked' : ''?>>
-                  <span class='slider'></span>
-                </label>
-                <span style='margin-left: 10px;'>🚚 Доставка</span>
-              </div>
+                  $type = $j['type'] ?? 'service';
+                  $typeIcon = $type === 'cart' ? '🛒' : ($type === 'callback' ? '📞' : ($type === 'photo_constructor' ? '📸' : '📋'));
+                  $orderId = $j['id'] ?? 'unknown';
+                  $status = $j['status'] ?? 'new';
 
-              <div>
-                <label class='toggle'>
-                  <input type='checkbox' name='homepage_features[photo_constructor]' <?=!empty($cfg['homepage_features']['photo_constructor']) ? 'checked' : ''?>>
-                  <span class='slider'></span>
-                </label>
-                <span style='margin-left: 10px;'>📸 Фотоконструктор</span>
-              </div>
-            </div>
+                  echo '<tr data-type="'.esc($type).'" data-order-id="'.esc($orderId).'" data-status="'.esc($status).'">';
+                  echo '<td><small>'.esc(date('d.m H:i', strtotime($ts))).'</small></td>';
+                  echo '<td>'.$typeIcon.'</td>';
+                  echo '<td>';
+                  echo '<strong>'.esc($j['name'] ?? '—').'</strong><br>';
+                  echo '<small>'.esc($j['phone'] ?? '—').'</small>';
+                  if (!empty($j['email'])) echo '<br><small>'.esc($j['email']).'</small>';
+                  echo '</td>';
 
-            <div style='margin-top: 20px;'>
-              <button class='btn' name='save_homepage' value='1'>💾 Сохранить настройки главной</button>
-            </div>
-          </form>
+                  // Описание заказа
+                  echo '<td>';
+                  if ($type === 'cart') {
+                    $itemCount = count($j['items'] ?? []);
+                    echo 'Товары: '.$itemCount.' шт<br>';
+                    if (!empty($j['items'])) {
+                      foreach (array_slice($j['items'], 0, 2) as $item) {
+                        echo '<small>• '.esc($item['name'] ?? '').' × '.($item['quantity'] ?? 1).'</small><br>';
+                      }
+                      if (count($j['items']) > 2) echo '<small>... и еще '.(count($j['items']) - 2).'</small>';
+                    }
+                  } elseif ($type === 'photo_constructor') {
+                    $photoCount = $j['photo_count'] ?? 0;
+                    echo 'Фотопечать: '.$photoCount.' фото<br>';
+                    echo '<small>Размер: '.esc($j['size'] ?? '—').'</small><br>';
+                    echo '<small>Бумага: '.esc($j['paper'] ?? '—').'</small><br>';
+                    echo '<small>Тираж: '.esc($j['qty_per_photo'] ?? 1).' на фото</small>';
+                  } elseif ($type === 'callback') {
+                    echo 'Обратный звонок<br>';
+                    if (!empty($j['preferred_time'])) echo '<small>Время: '.esc($j['preferred_time']).'</small>';
+                  } else {
+                    echo esc($j['service'] ?? '—').'<br>';
+                    if (!empty($j['comment'])) echo '<small>'.esc(mb_substr($j['comment'], 0, 50)).'...</small>';
+                  }
+                  echo '</td>';
+
+                  // Сумма
+                  echo '<td>';
+                  if (isset($j['total_price'])) {
+                    echo '<strong>'.number_format($j['total_price'], 0, ',', ' ').' ₽</strong>';
+                  } elseif (isset($j['estimated_price'])) {
+                    echo '<strong>'.number_format($j['estimated_price'], 0, ',', ' ').' ₽</strong>';
+                  } elseif (!empty($j['price']) && $j['price'] !== '—') {
+                    echo '<strong>'.esc($j['price']).'</strong>';
+                  } else {
+                    echo '<span class="muted">—</span>';
+                  }
+                  echo '</td>';
+
+                  // Статус с возможностью изменения
+                  echo '<td>';
+                  $statusLabels = [
+                    'new' => ['Новый', 'badge-info'],
+                    'in_progress' => ['В работе', 'badge-warning'],
+                    'completed' => ['Готово', 'badge-success'],
+                    'cancelled' => ['Отменен', 'badge-danger'],
+                    'paid' => ['Оплачен', 'badge-success'],
+                    'pending_payment' => ['Ожидает оплаты', 'badge-warning']
+                  ];
+
+                  $statusInfo = $statusLabels[$status] ?? ['Неизвестно', 'badge'];
+                  echo '<span class="badge '.$statusInfo[1].'">'.$statusInfo[0].'</span>';
+
+                  $paymentMethod = $j['payment_method'] ?? '';
+                  if ($paymentMethod === 'online') {
+                    echo '<br><small class="muted">💳 Онлайн</small>';
+                  }
+                  echo '</td>';
+
+                  // Действия
+                  echo '<td>';
+                  echo '<button class="btn2" style="padding:4px 8px;font-size:11px;margin:2px" onclick="viewOrderDetails(\''.esc($orderId).'\')">👁️ Детали</button>';
+                  echo '<button class="btn2" style="padding:4px 8px;font-size:11px;margin:2px" onclick="editOrderStatus(\''.esc($orderId).'\', \''.esc($status).'\')">✏️ Статус</button>';
+
+                  if (!empty($j['name']) && !empty($j['phone'])) {
+                    echo '<button class="btn2" style="padding:4px 8px;font-size:11px;margin:2px" onclick="viewCustomer(\''.esc(preg_replace('/[^0-9]/', '', $j['phone'])).'\')">👤 CRM</button>';
+                  }
+                  echo '</td>';
+                  echo '</tr>';
+                }
+                ?>
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        <!-- Управление услугами -->
+        <!-- База клиентов -->
         <div class='card'>
-          <h3>🛠️ Управление услугами и ценами</h3>
-          <form method='post' id='servicesForm'>
-            <div id='servicesList'>
-              <?php foreach($services as $i => $service): ?>
-                <div class='service-item'>
-                  <div class='form-row'>
-                    <div class='form-group'>
-                      <label>Название услуги</label>
-                      <input name='services[<?=$i?>][name]' value='<?=esc($service['name'])?>' placeholder='Фото на документы'>
-                    </div>
-                    <div class='form-group'>
-                      <label>Цена</label>
-                      <input name='services[<?=$i?>][price]' value='<?=esc($service['price'])?>' placeholder='от 400 ₽'>
-                    </div>
-                  </div>
+          <h3>👥 База клиентов (CRM)</h3>
+          <div style='overflow-x:auto'>
+            <table>
+              <thead>
+                <tr>
+                  <th>Клиент</th>
+                  <th>Контакты</th>
+                  <th>Заказов</th>
+                  <th>Потрачено</th>
+                  <th>Последний контакт</th>
+                  <th>Теги</th>
+                  <th>Действия</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php
+                // Сортируем клиентов по последнему контакту
+                usort($customers, function($a, $b) {
+                  return strtotime($b['last_contact'] ?? '1970-01-01') - strtotime($a['last_contact'] ?? '1970-01-01');
+                });
 
-                  <div class='form-group'>
-                    <label>Описание</label>
-                    <textarea name='services[<?=$i?>][description]' rows='2'><?=esc($service['description'])?></textarea>
-                  </div>
+                foreach (array_slice($customers, 0, 50) as $customer):
+                ?>
+                  <tr>
+                    <td>
+                      <strong><?=esc($customer['name'])?></strong><br>
+                      <small class='muted'>ID: <?=esc($customer['id'])?></small>
+                    </td>
+                    <td>
+                      <small><?=esc($customer['phone'])?></small><br>
+                      <?php if (!empty($customer['email'])): ?>
+                        <small><?=esc($customer['email'])?></small>
+                      <?php endif; ?>
+                    </td>
+                    <td><strong><?=($customer['orders_count'] ?? 0)?></strong></td>
+                    <td><strong><?=number_format($customer['total_spent'] ?? 0, 0, ' ', ' ')?> ₽</strong></td>
+                    <td><small><?=esc(date('d.m.Y H:i', strtotime($customer['last_contact'] ?? '1970-01-01')))?></small></td>
+                    <td>
+                      <?php if (!empty($customer['tags'])): ?>
+                        <?php foreach (array_slice($customer['tags'], 0, 3) as $tag): ?>
+                          <span class='customer-tag'><?=esc($tag)?></span>
+                        <?php endforeach; ?>
+                      <?php endif; ?>
+                    </td>
+                    <td>
+                      <button class='btn2' style='padding:4px 8px;font-size:11px' onclick='viewCustomer("<?=esc($customer['id'])?>")'> 👁️ Профиль</button>
+                    </td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
 
-                  <div class='service-controls'>
-                    <label class='toggle'>
-                      <input type='checkbox' name='services[<?=$i?>][enabled]' <?=!empty($service['enabled']) ? 'checked' : ''?>>
-                      <span class='slider'></span>
-                    </label>
-                    <span>Услуга активна</span>
-
-                    <label class='toggle' style='margin-left: 20px;'>
-                      <input type='checkbox' name='services[<?=$i?>][yukassa_enabled]' <?=!empty($service['yukassa_enabled']) ? 'checked' : ''?>>
-                      <span class='slider'></span>
-                    </label>
-                    <span>ЮКасса включена</span>
-
-                    <button type='button' class='btn-danger' onclick='removeService(this)' style='margin-left: auto;'>🗑️ Удалить</button>
-                  </div>
-                </div>
-              <?php endforeach; ?>
+          <?php if (count($customers) > 50): ?>
+            <div style='text-align:center;margin-top:16px' class='muted'>
+              Показано 50 из <?=count($customers)?> клиентов
             </div>
-
-            <div class='flex' style='margin-top: 16px;'>
-              <button type='button' class='btn2' onclick='addService()'>➕ Добавить услугу</button>
-              <button class='btn-success' name='save_services' value='1'>💾 Сохранить услуги</button>
-            </div>
-          </form>
+          <?php endif; ?>
         </div>
       </div>
 
-      <!-- НОВЫЙ РАЗДЕЛ: Фотоконструктор -->
-      <div id='tab-photo-config' class='tab-content' style='display:none'>
+      <!-- РАЗДЕЛ: Фотоконструктор (из первого файла) -->
+      <div id='tab-photoconstructor' class='tab-content' style='<?=($_GET['tab']??'')==='photoconstructor'?'':'display:none'?>'>
         <div class='card'>
           <h3>📸 Настройки фотоконструктора</h3>
           <form method='post' id='photoConfigForm'>
@@ -1186,103 +1461,724 @@ $isLogin = !isset($_SESSION['is_admin']);
         </div>
       </div>
 
-      <!-- Заказы (упрощенная версия для экономии места) -->
-      <div id='tab-orders' class='tab-content' style='display:none'>
+      <!-- РАЗДЕЛ: Главная страница -->
+      <div id='tab-homepage' class='tab-content' style='<?=($_GET['tab']??'')==='homepage'?'':'display:none'?>'>
         <div class='card'>
-          <h3>📦 Управление заказами</h3>
+          <h3>🏠 Настройки главной страницы</h3>
+          <form method='post'>
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>Название бренда</label>
+                <input name='brand' value='<?=esc($cfg['brand'])?>' placeholder='Копировальный фотоцентр ПРИНТСС'>
+              </div>
+              <div class='form-group'>
+                <label>Слоган</label>
+                <input name='slogan' value='<?=esc($cfg['slogan'])?>' placeholder='Печать в Сосновом Бору'>
+              </div>
+            </div>
 
-          <div class='orders-filter'>
-            <button class='filter-btn active' onclick='filterOrders("all")'>Все</button>
-            <button class='filter-btn' onclick='filterOrders("cart")'>🛒 Товары</button>
-            <button class='filter-btn' onclick='filterOrders("photo_constructor")'>📸 Фото</button>
-            <button class='filter-btn' onclick='filterOrders("service")'>📋 Услуги</button>
-            <button class='filter-btn' onclick='filterOrders("callback")'>📞 Звонки</button>
+            <div class='form-group'>
+              <label>Заголовок героя (главный призыв)</label>
+              <input name='hero' value='<?=esc($cfg['hero'])?>' placeholder='Фото на документы — 5 минут'>
+            </div>
+
+            <div class='form-group'>
+              <label>Описание каталога услуг</label>
+              <textarea name='catalog_desc' rows='2'><?=esc($cfg['catalog_desc'])?></textarea>
+            </div>
+
+            <h4>📋 Функции главной страницы</h4>
+            <div class='row'>
+              <div>
+                <label class='toggle'>
+                  <input type='checkbox' name='homepage_features[fast_photo]' <?=!empty($cfg['homepage_features']['fast_photo']) ? 'checked' : ''?>>
+                  <span class='slider'></span>
+                </label>
+                <span style='margin-left: 10px;'>⚡ Быстрое фото на документы</span>
+              </div>
+
+              <div>
+                <label class='toggle'>
+                  <input type='checkbox' name='homepage_features[online_payment]' <?=!empty($cfg['homepage_features']['online_payment']) ? 'checked' : ''?>>
+                  <span class='slider'></span>
+                </label>
+                <span style='margin-left: 10px;'>💳 Онлайн оплата</span>
+              </div>
+
+              <div>
+                <label class='toggle'>
+                  <input type='checkbox' name='homepage_features[delivery]' <?=!empty($cfg['homepage_features']['delivery']) ? 'checked' : ''?>>
+                  <span class='slider'></span>
+                </label>
+                <span style='margin-left: 10px;'>🚚 Доставка</span>
+              </div>
+
+              <div>
+                <label class='toggle'>
+                  <input type='checkbox' name='homepage_features[photo_constructor]' <?=!empty($cfg['homepage_features']['photo_constructor']) ? 'checked' : ''?>>
+                  <span class='slider'></span>
+                </label>
+                <span style='margin-left: 10px;'>📸 Фотоконструктор</span>
+              </div>
+            </div>
+
+            <div style='margin-top: 20px;'>
+              <button class='btn-success' name='save_homepage' value='1'>💾 Сохранить настройки главной</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Управление услугами -->
+        <div class='card'>
+          <h3>🛠️ Управление услугами и ценами</h3>
+          <form method='post' id='servicesForm'>
+            <div id='servicesList'>
+              <?php foreach($services as $i => $service): ?>
+                <div class='service-item'>
+                  <div class='form-row'>
+                    <div class='form-group'>
+                      <label>Название услуги</label>
+                      <input name='services[<?=$i?>][name]' value='<?=esc($service['name'])?>' placeholder='Фото на документы'>
+                    </div>
+                    <div class='form-group'>
+                      <label>Цена</label>
+                      <input name='services[<?=$i?>][price]' value='<?=esc($service['price'])?>' placeholder='от 400 ₽'>
+                    </div>
+                  </div>
+
+                  <div class='form-group'>
+                    <label>Описание</label>
+                    <textarea name='services[<?=$i?>][description]' rows='2'><?=esc($service['description'])?></textarea>
+                  </div>
+
+                  <div class='service-controls'>
+                    <label class='toggle'>
+                      <input type='checkbox' name='services[<?=$i?>][enabled]' <?=!empty($service['enabled']) ? 'checked' : ''?>>
+                      <span class='slider'></span>
+                    </label>
+                    <span>Услуга активна</span>
+
+                    <label class='toggle' style='margin-left: 20px;'>
+                      <input type='checkbox' name='services[<?=$i?>][yukassa_enabled]' <?=!empty($service['yukassa_enabled']) ? 'checked' : ''?>>
+                      <span class='slider'></span>
+                    </label>
+                    <span>ЮКасса включена</span>
+
+                    <button type='button' class='btn-danger' onclick='removeService(this)' style='margin-left: auto;'>🗑️ Удалить</button>
+                  </div>
+                </div>
+              <?php endforeach; ?>
+            </div>
+
+            <div class='flex' style='margin-top: 16px;'>
+              <button type='button' class='btn2' onclick='addService()'>➕ Добавить услугу</button>
+              <button class='btn-success' name='save_services' value='1'>💾 Сохранить услуги</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- РАЗДЕЛ: Товары -->
+      <div id='tab-products' class='tab-content' style='<?=($_GET['tab']??'')==='products'?'':'display:none'?>'>
+        <div class='card'>
+          <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px'>
+            <h3>🛍️ Управление товарами</h3>
+            <button class='btn-success' onclick='openProductModal()'>➕ Добавить товар</button>
           </div>
 
-          <div style='max-height:600px;overflow:auto;margin-top:16px'>
-            <table id='ordersTable'>
-              <thead>
-                <tr>
-                  <th>Время</th>
-                  <th>Тип</th>
-                  <th>Клиент</th>
-                  <th>Заказ</th>
-                  <th>Сумма</th>
-                  <th>Статус</th>
-                  <th>Действия</th>
-                </tr>
-              </thead>
-              <tbody>
-                <?php
-                $lines = array_slice(array_reverse($lines), 0, 200);
-                foreach($lines as $line){
-                  if(!preg_match('~^$$(.+?)$$ (.+)$~u', $line, $m)) continue;
-                  $ts = $m[1];
-                  $j = json_decode($m[2], true);
-                  if (!$j) continue;
+          <div class='products-grid'>
+            <?php foreach($products as $product): ?>
+              <div class='product-card'>
+                <?php if($product['featured']): ?>
+                  <div class='badge badge-warning' style='position:absolute;top:8px;right:8px;z-index:10'>ХИТ</div>
+                <?php endif; ?>
 
-                  $type = $j['type'] ?? 'service';
-                  $typeIcon = $type === 'cart' ? '🛒' : ($type === 'callback' ? '📞' : ($type === 'photo_constructor' ? '📸' : '📋'));
-                  $orderId = $j['id'] ?? 'unknown';
+                <div class='product-image'>
+                  <?php if($product['image'] && file_exists($uploadsDir.'/'.$product['image'])): ?>
+                    <img src='uploads/<?=esc($product['image'])?>' alt='<?=esc($product['name'])?>'>
+                  <?php else: ?>
+                    <div style='color:#666;font-size:32px'>📦</div>
+                  <?php endif; ?>
+                </div>
 
-                  echo '<tr data-type="'.$type.'" data-order-id="'.esc($orderId).'">';
-                  echo '<td><small>'.esc(date('d.m H:i', strtotime($ts))).'</small></td>';
-                  echo '<td>'.$typeIcon.'</td>';
-                  echo '<td><strong>'.esc($j['name'] ?? '').'</strong><br><small>'.esc($j['phone'] ?? '').'</small></td>';
+                <h4 style='margin:12px 0 8px'><?=esc($product['name'])?></h4>
+                <p class='muted' style='font-size:12px;margin-bottom:8px'><?=esc($product['description'])?></p>
 
-                  if ($type === 'cart') {
-                    $itemCount = count($j['items'] ?? []);
-                    echo '<td>Товары ('.$itemCount.' шт)</td>';
-                    echo '<td><strong>'.number_format($j['total_price'] ?? 0, 0, ',', ' ').' ₽</strong></td>';
-                  } elseif ($type === 'photo_constructor') {
-                    $photoCount = $j['photo_count'] ?? 0;
-                    echo '<td>Фото ('.$photoCount.' шт)<br><small>'.esc($j['size'] ?? '').'</small></td>';
-                    echo '<td><strong>'.number_format($j['estimated_price'] ?? 0, 0, ',', ' ').' ₽</strong></td>';
-                  } elseif ($type === 'callback') {
-                    echo '<td>Обратный звонок</td>';
-                    echo '<td>—</td>';
-                  } else {
-                    echo '<td>'.esc($j['service'] ?? '').'</td>';
-                    echo '<td>'.esc($j['price'] ?? '—').'</td>';
-                  }
+                <div style='display:flex;align-items:baseline;gap:8px;margin-bottom:8px'>
+                  <strong style='font-size:16px'><?=number_format($product['price'])?> ₽</strong>
+                  <?php if($product['old_price'] > 0): ?>
+                    <s class='muted'><?=number_format($product['old_price'])?> ₽</s>
+                  <?php endif; ?>
+                </div>
 
-                  $status = $j['status'] ?? 'new';
-                  $paymentMethod = $j['payment_method'] ?? '';
+                <div style='margin-bottom:12px'>
+                  <span class='badge <?=$product['enabled'] ? 'badge-success' : 'badge-danger'?>'>
+                    <?=$product['enabled'] ? 'Активен' : 'Отключен'?>
+                  </span>
+                  <span class='badge'>Склад: <?=$product['stock']?></span>
+                  <span class='badge'><?=ucfirst($product['category'])?></span>
+                </div>
 
-                  if ($status === 'paid') {
-                    echo '<td><span class="badge badge-success">Оплачен</span></td>';
-                  } elseif ($paymentMethod === 'online') {
-                    echo '<td><span class="badge badge-warning">Ожидает оплаты</span></td>';
-                  } else {
-                    echo '<td><span class="badge">Новый</span></td>';
-                  }
+                <div style='display:flex;gap:6px'>
+                  <button class='btn2' style='flex:1;padding:6px' onclick='editProduct(<?=json_encode($product, JSON_UNESCAPED_UNICODE)?>)'>✏️ Редактировать</button>
+                  <form method='post' style='display:inline' onsubmit='return confirm("Удалить товар?")'>
+                    <input type='hidden' name='delete_product' value='1'>
+                    <input type='hidden' name='id' value='<?=$product['id']?>'>
+                    <button class='btn-danger' style='padding:6px 8px'>🗑️</button>
+                  </form>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          </div>
 
-                  echo '<td><button class="btn2" onclick="viewOrder(\''.esc($orderId).'\')">👁️</button></td>';
-                  echo '</tr>';
-                }
-                ?>
-              </tbody>
-            </table>
+          <?php if(empty($products)): ?>
+            <div style='text-align:center;padding:40px;color:var(--muted)'>
+              <div style='font-size:48px;margin-bottom:16px'>📦</div>
+              <h4>Нет товаров</h4>
+              <p>Добавьте первый товар для продажи</p>
+            </div>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <!-- РАЗДЕЛ: Основные настройки -->
+      <div id='tab-settings' class='tab-content' style='<?=($_GET['tab']??'')==='settings'?'':'display:none'?>'>
+        <div class='card'>
+          <h3>⚙️ Основные настройки</h3>
+          <form method='post'>
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>Название бренда</label>
+                <input name='brand' value='<?=esc($cfg['brand'])?>' placeholder='Фотоцентр ПРИНТСС'>
+              </div>
+              <div class='form-group'>
+                <label>Слоган</label>
+                <input name='slogan' value='<?=esc($cfg['slogan'])?>' placeholder='Печать в Сосновом Бору'>
+              </div>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>Телефон (отображаемый)</label>
+                <input name='phone_display' value='<?=esc($cfg['phone_display'])?>' placeholder='+7 (952) 200-39-90'>
+              </div>
+              <div class='form-group'>
+                <label>Телефон (для ссылок)</label>
+                <input name='phone_raw' value='<?=esc($cfg['phone_raw'])?>' placeholder='+79522003990'>
+              </div>
+            </div>
+
+            <div class='form-group'>
+              <label>Email для заказов</label>
+              <input name='email_to' value='<?=esc($cfg['email_to'])?>' placeholder='info@example.com'>
+            </div>
+
+            <div class='form-group'>
+              <label>Адрес</label>
+              <input name='address' value='<?=esc($cfg['address'])?>' placeholder='г. Город, ул. Улица, 1'>
+            </div>
+
+            <div class='form-group'>
+              <label>Рабочие часы (каждый с новой строки)</label>
+              <textarea name='workhours' rows='3'><?=esc(implode('\n', $cfg['workhours']))?></textarea>
+            </div>
+
+            <div class='form-group'>
+              <label>Пароль администратора</label>
+              <input type='password' name='admin_pass' placeholder='Оставьте пустым, чтобы не менять'>
+              <div class='muted mini'>Текущий пароль: <?=esc($cfg['admin_pass'])?></div>
+            </div>
+
+            <div style='margin-top: 20px;'>
+              <button class='btn-success' name='admin_save' value='1'>💾 Сохранить основные настройки</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- SEO настройки -->
+        <div class='card'>
+          <h3>🔍 SEO и мета-теги</h3>
+          <form method='post'>
+            <div class='form-group'>
+              <label>Заголовок страницы (Title)</label>
+              <input name='seo[title]' value='<?=esc($cfg['seo']['title'])?>' placeholder='Фотоцентр — быстрая печать'>
+            </div>
+
+            <div class='form-group'>
+              <label>Описание (Description)</label>
+              <textarea name='seo[description]' rows='3'><?=esc($cfg['seo']['description'])?></textarea>
+            </div>
+
+            <div class='form-group'>
+              <label>Ключевые слова (Keywords)</label>
+              <input name='seo[keywords]' value='<?=esc($cfg['seo']['keywords'])?>' placeholder='печать, фото, визитки'>
+            </div>
+
+            <div class='form-group'>
+              <label>Изображение для соцсетей (OG Image)</label>
+              <input name='seo[og_image]' value='<?=esc($cfg['seo']['og_image'])?>' placeholder='https://example.com/og-image.jpg'>
+            </div>
+
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='seo[sitemap_enable]' <?=!empty($cfg['seo']['sitemap_enable']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Включить карту сайта</span>
+            </div>
+
+            <button class='btn-success' name='admin_save' value='1'>💾 Сохранить SEO настройки</button>
+          </form>
+        </div>
+
+        <!-- Реквизиты -->
+        <div class='card'>
+          <h3>📋 Реквизиты и правовая информация</h3>
+          <form method='post'>
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='business[show_requisites]' <?=!empty($cfg['business']['show_requisites']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Показывать реквизиты на сайте</span>
+            </div>
+
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='business[show_payment_icons]' <?=!empty($cfg['business']['show_payment_icons']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Показывать иконки способов оплаты</span>
+            </div>
+
+            <div class='form-group'>
+              <label>Юридическое название</label>
+              <input name='business[legal_name]' value='<?=esc($cfg['business']['legal_name'])?>' placeholder='ИП Иванов И.И.'>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>ИНН</label>
+                <input name='business[inn]' value='<?=esc($cfg['business']['inn'])?>' placeholder='123456789012'>
+              </div>
+              <div class='form-group'>
+                <label>ОГРНИП</label>
+                <input name='business[ogrn]' value='<?=esc($cfg['business']['ogrn'])?>' placeholder='123456789012345'>
+              </div>
+            </div>
+
+            <div class='form-group'>
+              <label>Банк</label>
+              <input name='business[bank]' value='<?=esc($cfg['business']['bank'])?>' placeholder='ПАО Сбербанк'>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>БИК</label>
+                <input name='business[bik]' value='<?=esc($cfg['business']['bik'])?>' placeholder='044525225'>
+              </div>
+              <div class='form-group'>
+                <label>Расчетный счет</label>
+                <input name='business[account]' value='<?=esc($cfg['business']['account'])?>' placeholder='40817810099910004312'>
+              </div>
+            </div>
+
+            <button class='btn-success' name='admin_save' value='1'>💾 Сохранить реквизиты</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- РАЗДЕЛ: Интеграции -->
+      <div id='tab-integrations' class='tab-content' style='<?=($_GET['tab']??'')==='integrations'?'':'display:none'?>'>
+        <!-- ЮКасса -->
+        <div class='card'>
+          <h3>💳 ЮКасса (онлайн-платежи)</h3>
+          <form method='post'>
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='yukassa[enabled]' <?=!empty($cfg['yukassa']['enabled']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Включить онлайн-платежи ЮКасса</span>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>Shop ID</label>
+                <input name='yukassa[shop_id]' value='<?=esc($cfg['yukassa']['shop_id'])?>' placeholder='123456'>
+              </div>
+              <div class='form-group'>
+                <label>Secret Key</label>
+                <input type='password' name='yukassa[secret_key]' value='<?=!empty($cfg['yukassa']['secret_key']) ? '__KEEP__' : ''?>' placeholder='live_...'>
+              </div>
+            </div>
+
+            <div class='form-group'>
+              <label>URL возврата после оплаты</label>
+              <input name='yukassa[return_url]' value='<?=esc($cfg['yukassa']['return_url'])?>' placeholder='https://example.com/payment_result.php'>
+            </div>
+
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='yukassa[test_mode]' <?=!empty($cfg['yukassa']['test_mode']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Тестовый режим</span>
+            </div>
+
+            <h4>Где принимать онлайн-платежи:</h4>
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='yukassa[services][products]' <?=!empty($cfg['yukassa']['services']['products']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Товары (магазин)</span>
+            </div>
+
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='yukassa[services][photo_constructor]' <?=!empty($cfg['yukassa']['services']['photo_constructor']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Фотоконструктор</span>
+            </div>
+
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='yukassa[services][regular_orders]' <?=!empty($cfg['yukassa']['services']['regular_orders']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Обычные заявки</span>
+            </div>
+
+            <button class='btn-success' name='admin_save' value='1'>💾 Сохранить ЮКасса</button>
+          </form>
+        </div>
+
+        <!-- Email -->
+        <div class='card'>
+          <h3>📧 Настройки Email</h3>
+          <form method='post'>
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='smtp_enabled' <?=!empty($cfg['smtp']['enabled']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Использовать SMTP (рекомендуется)</span>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>SMTP сервер</label>
+                <input name='smtp_host' value='<?=esc($cfg['smtp']['host'])?>' placeholder='smtp.mail.ru'>
+              </div>
+              <div class='form-group'>
+                <label>Порт</label>
+                <input type='number' name='smtp_port' value='<?=esc($cfg['smtp']['port'])?>' placeholder='465'>
+              </div>
+            </div>
+
+            <div class='form-row'>
+              <div class='form-group'>
+                <label>Шифрование</label>
+                <select name='smtp_secure'>
+                  <option value='ssl' <?=$cfg['smtp']['secure']==='ssl'?'selected':''?>>SSL</option>
+                  <option value='tls' <?=$cfg['smtp']['secure']==='tls'?'selected':''?>>TLS</option>
+                  <option value='none' <?=$cfg['smtp']['secure']==='none'?'selected':''?>>Без шифрования</option>
+                </select>
+              </div>
+              <div class='form-group'>
+                <label>Логин</label>
+                <input name='smtp_user' value='<?=esc($cfg['smtp']['user'])?>' placeholder='user@mail.ru'>
+              </div>
+            </div>
+
+            <div class='form-group'>
+              <label>Пароль SMTP</label>
+              <input type='password' name='smtp_pass' value='<?=!empty($cfg['smtp']['pass']) ? '__KEEP__' : ''?>' placeholder='Пароль для SMTP'>
+            </div>
+
+            <div style='margin-top:16px;display:flex;gap:8px;align-items:center'>
+              <button class='btn-success' name='admin_save' value='1'>💾 Сохранить Email</button>
+              <button class='btn2' name='admin_test_email' value='1'>📧 Тест Email</button>
+              <?php if(isset($_GET['test_email'])): ?>
+                <span class='<?=($_GET['test_email']==='ok' ? 'ok' : 'bad')?>'><?=($_GET['test_email']==='ok' ? '✅ OK' : '❌ Ошибка')?></span>
+              <?php endif; ?>
+            </div>
+          </form>
+        </div>
+
+        <!-- Telegram -->
+        <div class='card'>
+          <h3>🤖 Telegram уведомления</h3>
+          <form method='post'>
+            <div style='margin-bottom:16px'>
+              <label class='toggle'>
+                <input type='checkbox' name='tg_enabled' <?=!empty($cfg['telegram']['enabled']) ? 'checked' : ''?>>
+                <span class='slider'></span>
+              </label>
+              <span style='margin-left: 10px;'>Включить Telegram уведомления</span>
+            </div>
+
+            <div class='form-group'>
+              <label>Token бота</label>
+              <input name='tg_token' value='<?=esc($cfg['telegram']['token'])?>' placeholder='123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'>
+              <div class='muted mini'>Получите у @BotFather</div>
+            </div>
+
+            <div class='form-group'>
+              <label>Chat ID</label>
+              <input name='tg_chat' value='<?=esc($cfg['telegram']['chat'])?>' placeholder='-100123456789'>
+              <div class='muted mini'>ID чата или группы для уведомлений</div>
+            </div>
+
+            <div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:16px'>
+              <button class='btn-success' name='admin_save' value='1'>💾 Сохранить Telegram</button>
+              <button class='btn2' name='admin_test_tg' value='1'>🤖 Тест Telegram</button>
+              <button class='btn2' name='tg_delete_webhook' value='1'>🔄 Удалить Webhook</button>
+              <button class='btn2' name='tg_get_updates' value='1'>📨 Получить обновления</button>
+            </div>
+
+            <div style='margin-top:8px;display:flex;gap:8px;align-items:center'>
+              <?php if(isset($_GET['test_tg'])): ?>
+                <span class='<?=($_GET['test_tg']==='ok' ? 'ok' : 'bad')?>'><?=($_GET['test_tg']==='ok' ? '✅ OK' : '❌ Ошибка')?></span>
+              <?php endif; ?>
+              <?php if(isset($_GET['tg_webhook'])): ?>
+                <span class='<?=($_GET['tg_webhook']==='deleted' ? 'ok' : 'bad')?>'><?=($_GET['tg_webhook']==='deleted' ? '🔄 Webhook удален' : '❌ Ошибка webhook')?></span>
+              <?php endif; ?>
+              <?php if(isset($_GET['tg_updates'])): ?>
+                <span class='<?=($_GET['tg_updates']==='ok' ? 'ok' : 'bad')?>'><?=($_GET['tg_updates']==='ok' ? '📨 Обновления получены' : '❌ Ошибка обновлений')?></span>
+              <?php endif; ?>
+            </div>
+
+            <?php if(isset($_SESSION['tg_updates']) && is_array($_SESSION['tg_updates'])): ?>
+              <div style='margin-top:16px;padding:12px;background:#1a1f28;border-radius:8px'>
+                <div class='muted mini' style='margin-bottom:8px'>Последние сообщения в боте:</div>
+                <?php foreach(array_slice($_SESSION['tg_updates'], -5) as $u): ?>
+                  <?php if(isset($u['message'])): $msg=$u['message']; ?>
+                    <div style='background:#252b3a;padding:8px;margin:6px 0;border-radius:6px;font-size:12px'>
+                      <strong>Chat: <?=esc($msg['chat']['id'])?></strong> |
+                      <?=esc($msg['from']['first_name']??'')?> <?=esc($msg['from']['last_name']??' ')?>
+                      <br><?=esc(mb_substr($msg['text']??'',0,100))?>
+                      <form method='post' style='display:inline;margin-left:8px'>
+                        <input type='hidden' name='chat' value='<?=esc($msg['chat']['id'])?>'>
+                        <button class='btn2' name='tg_use_chat' value='1' style='padding:2px 6px;font-size:10px'>Использовать этот чат</button>
+                      </form>
+                    </div>
+                  <?php endif; ?>
+                <?php endforeach; ?>
+              </div>
+            <?php endif; ?>
+          </form>
+        </div>
+      </div>
+
+      <!-- РАЗДЕЛ: Дизайн -->
+      <div id='tab-design' class='tab-content' style='<?=($_GET['tab']??'')==='design'?'':'display:none'?>'>
+        <div class='row'>
+          <!-- Загрузка изображений -->
+          <div class='card'>
+            <h3>🖼️ Изображения сайта</h3>
+
+            <h4>Логотип</h4>
+            <form method='post' enctype='multipart/form-data' id='logoForm'>
+              <input type='hidden' name='admin_upload' value='1'>
+              <input type='hidden' name='what' value='logo'>
+              <div class='drop <?=!empty($cfg['logo']) ? 'has-image' : ''?>' id='logoDrop'>
+                <input type='file' name='file' accept='image/*' onchange='handleFileUpload(this, "logoDrop", "logoForm")'>
+                <button type='button' class='drop-remove' onclick='removeImage("logoDrop", "logo")'>✕</button>
+                <div class='drop-content'>
+                  <?php if(!empty($cfg['logo'])): ?>
+                    <img src='<?=esc($cfg['logo'])?>' class='drop-preview' alt='Логотип'>
+                    <div class='drop-text'>Логотип загружен</div>
+                    <div class='drop-hint'>Нажмите для замены</div>
+                  <?php else: ?>
+                    <div class='drop-icon'>🖼️</div>
+                    <div class='drop-text'>Загрузить логотип</div>
+                    <div class='drop-hint'>PNG, JPG, SVG до 10 МБ</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+            </form>
+
+            <h4 style='margin-top:20px'>Hero изображение</h4>
+            <form method='post' enctype='multipart/form-data' id='heroForm'>
+              <input type='hidden' name='admin_upload' value='1'>
+              <input type='hidden' name='what' value='hero'>
+              <div class='drop <?=($cfg['hero_mode']==='image'&&!empty($cfg['hero_image'])) ? 'has-image' : ''?>' id='heroDrop'>
+                <input type='file' name='file' accept='image/*' onchange='handleFileUpload(this, "heroDrop", "heroForm")'>
+                <button type='button' class='drop-remove' onclick='removeImage("heroDrop", "hero")'>✕</button>
+                <div class='drop-content'>
+                  <?php if($cfg['hero_mode']==='image'&&!empty($cfg['hero_image'])): ?>
+                    <img src='<?=esc($cfg['hero_image'])?>' class='drop-preview' alt='Hero изображение'>
+                    <div class='drop-text'>Hero изображение загружено</div>
+                    <div class='drop-hint'>Нажмите для замены</div>
+                  <?php else: ?>
+                    <div class='drop-icon'>🎨</div>
+                    <div class='drop-text'>Загрузить hero изображение</div>
+                    <div class='drop-hint'>PNG, JPG до 10 МБ</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <!-- Цветовая схема -->
+          <div class='card'>
+            <h3>🎨 Цветовая схема и стили</h3>
+            <form method='post'>
+              <div class='form-row'>
+                <div class='form-group'>
+                  <label>Основной цвет бренда</label>
+                  <input type='color' name='theme[brand]' value='<?=esc($cfg['theme']['brand'])?>'>
+                </div>
+                <div class='form-group'>
+                  <label>Акцентный цвет</label>
+                  <input type='color' name='theme[accent]' value='<?=esc($cfg['theme']['accent'])?>'>
+                </div>
+              </div>
+
+              <div class='form-row'>
+                <div class='form-group'>
+                  <label>Цвет фона</label>
+                  <input type='color' name='theme[bg]' value='<?=esc($cfg['theme']['bg'])?>'>
+                </div>
+                <div class='form-group'>
+                  <label>Цвет текста</label>
+                  <input type='color' name='theme[text]' value='<?=esc($cfg['theme']['text'])?>'>
+                </div>
+              </div>
+
+              <div class='form-group'>
+                <label>Цвет приглушенного текста</label>
+                <input type='color' name='theme[muted]' value='<?=esc($cfg['theme']['muted'])?>'>
+              </div>
+
+              <h4>Эффекты и размеры</h4>
+              <div class='form-row'>
+                <div class='form-group'>
+                  <label>Прозрачность карточек (<?=esc($cfg['theme']['card_opacity'])?>)</label>
+                  <input type='range' name='theme[card_opacity]' min='0.3' max='1' step='0.05' value='<?=esc($cfg['theme']['card_opacity'])?>'>
+                </div>
+                <div class='form-group'>
+                  <label>Размытие стекла (<?=esc($cfg['theme']['blur'])?>px)</label>
+                  <input type='range' name='theme[blur]' min='0' max='30' value='<?=esc($cfg['theme']['blur'])?>'>
+                </div>
+              </div>
+
+              <div class='form-row'>
+                <div class='form-group'>
+                  <label>Радиус скругления (<?=esc($cfg['theme']['radius'])?>px)</label>
+                  <input type='range' name='theme[radius]' min='0' max='28' value='<?=esc($cfg['theme']['radius'])?>'>
+                </div>
+                <div class='form-group'>
+                  <label>Сила теней (<?=esc($cfg['theme']['shadow'])?>)</label>
+                  <input type='range' name='theme[shadow]' min='0' max='0.5' step='0.01' value='<?=esc($cfg['theme']['shadow'])?>'>
+                </div>
+              </div>
+
+              <div class='form-group'>
+                <label>Ширина контейнера (<?=esc($cfg['theme']['container'])?>px)</label>
+                <input type='range' name='theme[container]' min='900' max='1400' step='50' value='<?=esc($cfg['theme']['container'])?>'>
+              </div>
+
+              <button class='btn-success' name='admin_save' value='1'>🎨 Применить дизайн</button>
+            </form>
           </div>
         </div>
       </div>
 
-      <!-- Остальные разделы сокращены для экономии места -->
-      <!-- Здесь должны быть остальные разделы: товары, настройки, интеграции, дизайн -->
-
     <?php endif; ?>
   </div>
 
-  <script>
-    let sizeIndex = <?=count($photoConfig['sizes'])?>;
-    let paperIndex = <?=count($photoConfig['papers'])?>;
-    let correctionIndex = <?=count($photoConfig['corrections'])?>;
-    let processingIndex = <?=count($photoConfig['processing_options'])?>;
-    let deliveryIndex = <?=count($photoConfig['delivery_options'])?>;
-    let discountIndex = <?=count($photoConfig['discounts'])?>;
-    let serviceIndex = <?=count($services)?>;
+  <!-- Модальные окна товаров -->
+  <div id='productModal' class='modal'>
+    <div class='modal-content'>
+      <div class='modal-header'>
+        <h3 id='productModalTitle'>Добавить товар</h3>
+        <button class='close-modal' onclick='closeProductModal()'>&times;</button>
+      </div>
+      <div class='modal-body'>
+        <form id='productForm' method='post' enctype='multipart/form-data'>
+          <input type='hidden' name='save_product' value='1'>
+          <input type='hidden' name='id' id='productId'>
 
-    // Переключение вкладок
+          <div class='form-row'>
+            <div class='form-group'>
+              <label>Название товара</label>
+              <input name='name' id='productName' required placeholder='Фоторамка 10×15'>
+            </div>
+            <div class='form-group'>
+              <label>Категория</label>
+              <select name='category' id='productCategory'>
+                <option value='frames'>🖼️ Фоторамки</option>
+                <option value='albums'>📚 Фотоальбомы</option>
+                <option value='souvenirs'>🎁 Сувениры</option>
+              </select>
+            </div>
+          </div>
+
+          <div class='form-row'>
+            <div class='form-group'>
+              <label>Цена (₽)</label>
+              <input type='number' name='price' id='productPrice' required placeholder='500'>
+            </div>
+            <div class='form-group'>
+              <label>Старая цена (₽)</label>
+              <input type='number' name='old_price' id='productOldPrice' placeholder='700'>
+            </div>
+          </div>
+
+          <div class='form-group'>
+            <label>Описание</label>
+            <textarea name='description' id='productDescription' rows='3' placeholder='Красивая деревянная рамка для фото'></textarea>
+          </div>
+
+          <div class='form-row'>
+            <div class='form-group'>
+              <label>Количество на складе</label>
+              <input type='number' name='stock' id='productStock' min='0' value='0' placeholder='10'>
+            </div>
+            <div class='form-group' style='display:flex;gap:16px;align-items:end;padding-top:20px'>
+              <label class='toggle'>
+                <input type='checkbox' name='enabled' id='productEnabled'>
+                <span class='slider'></span>
+              </label>
+              <span>Активен</span>
+
+              <label class='toggle' style='margin-left:12px'>
+                <input type='checkbox' name='featured' id='productFeatured'>
+                <span class='slider'></span>
+              </label>
+              <span>Рекомендуемый</span>
+            </div>
+          </div>
+
+          <div class='form-group'>
+            <label>Изображение</label>
+            <input type='file' name='image' accept='image/*'>
+            <div id='currentImage' style='margin-top:8px'></div>
+          </div>
+
+          <div style='text-align:center;margin-top:20px'>
+            <button class='btn-success' type='submit'>💾 Сохранить товар</button>
+            <button class='btn2' type='button' onclick='closeProductModal()'>Отмена</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Все переменные и функции
+    let sizeIndex = <?=count($photoConfig['sizes'])??0?>;
+    let paperIndex = <?=count($photoConfig['papers'])??0?>;
+    let correctionIndex = <?=count($photoConfig['corrections'])??0?>;
+    let processingIndex = <?=count($photoConfig['processing_options'])??0?>;
+    let deliveryIndex = <?=count($photoConfig['delivery_options'])??0?>;
+    let discountIndex = <?=count($photoConfig['discounts'])??0?>;
+    let serviceIndex = <?=count($services)??0?>;
+
     function showTab(tabName, element) {
       document.querySelectorAll('.tab-content').forEach(tab => {
         tab.style.display = 'none';
@@ -1292,240 +2188,56 @@ $isLogin = !isset($_SESSION['is_admin']);
       });
       document.getElementById('tab-' + tabName).style.display = 'block';
       element.classList.add('active');
+      history.replaceState(null, null, '?tab=' + tabName);
     }
 
-    // Общая функция для удаления элементов конфигурации
+    function viewCustomer(customerId) {
+      alert('Профиль клиента: ' + customerId);
+    }
+
+    function filterOrders(type) {
+      const rows = document.querySelectorAll('#ordersTable tbody tr');
+      const buttons = document.querySelectorAll('.orders-filter .filter-btn');
+
+      buttons.forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+
+      rows.forEach(row => {
+        const rowType = row.dataset.type;
+        const rowStatus = row.dataset.status;
+        let show = false;
+
+        if (type === 'all') show = true;
+        else if (type === 'new' && (rowStatus === 'new' || rowStatus === 'pending_payment')) show = true;
+        else if (type === 'in_progress' && rowStatus === 'in_progress') show = true;
+        else if (type === 'completed' && (rowStatus === 'completed' || rowStatus === 'paid')) show = true;
+        else if (rowType === type) show = true;
+
+        row.style.display = show ? '' : 'none';
+      });
+    }
+
+    function viewOrderDetails(orderId) {
+      alert('Детали заказа: ' + orderId);
+    }
+
+    function editOrderStatus(orderId, currentStatus) {
+      const newStatus = prompt('Новый статус для заказа ' + orderId + ':\n\nnew - Новый\nin_progress - В работе\ncompleted - Готово\ncancelled - Отменен', currentStatus);
+      if (newStatus && newStatus !== currentStatus) {
+        alert('Статус изменен на: ' + newStatus);
+      }
+    }
+
+    function exportOrders() {
+      alert('Экспорт заказов в CSV');
+    }
+
     function removeConfigItem(button) {
       if (confirm('Удалить этот элемент?')) {
         button.closest('.config-item').remove();
       }
     }
 
-    // Добавление размеров
-    function addSize() {
-      const container = document.getElementById('sizesList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='sizes[${sizeIndex}][name]' placeholder='13×18'>
-          </div>
-          <div class='form-group'>
-            <label>Ширина (см)</label>
-            <input type='number' step='0.1' name='sizes[${sizeIndex}][w]' placeholder='13'>
-          </div>
-          <div class='form-group'>
-            <label>Высота (см)</label>
-            <input type='number' step='0.1' name='sizes[${sizeIndex}][h]' placeholder='18'>
-          </div>
-          <div class='form-group'>
-            <label>Базовая цена (₽)</label>
-            <input type='number' name='sizes[${sizeIndex}][base]' placeholder='40'>
-          </div>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='sizes[${sizeIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Доступен</span>
-
-          <label class='toggle' style='margin-left: 20px;'>
-            <input type='checkbox' name='sizes[${sizeIndex}][popular]'>
-            <span class='slider'></span>
-          </label>
-          <span>Популярный</span>
-        </div>
-      `;
-      container.appendChild(item);
-      sizeIndex++;
-    }
-
-    // Добавление типов бумаги
-    function addPaper() {
-      const container = document.getElementById('papersList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='papers[${paperIndex}][name]' placeholder='Премиум'>
-          </div>
-          <div class='form-group'>
-            <label>Доплата (₽)</label>
-            <input type='number' name='papers[${paperIndex}][delta]' placeholder='20'>
-          </div>
-        </div>
-
-        <div class='form-group'>
-          <label>Описание</label>
-          <input name='papers[${paperIndex}][description]' placeholder='Премиум бумага повышенной плотности'>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='papers[${paperIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Доступен</span>
-        </div>
-      `;
-      container.appendChild(item);
-      paperIndex++;
-    }
-
-    // Добавление видов коррекции
-    function addCorrection() {
-      const container = document.getElementById('correctionsList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='corrections[${correctionIndex}][name]' placeholder='Премиум коррекция'>
-          </div>
-          <div class='form-group'>
-            <label>Доплата (₽)</label>
-            <input type='number' name='corrections[${correctionIndex}][delta]' placeholder='100'>
-          </div>
-        </div>
-
-        <div class='form-group'>
-          <label>Описание</label>
-          <input name='corrections[${correctionIndex}][description]' placeholder='Профессиональная обработка дизайнером'>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='corrections[${correctionIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Доступен</span>
-        </div>
-      `;
-      container.appendChild(item);
-      correctionIndex++;
-    }
-
-    // Добавление дополнительных услуг
-    function addProcessingOption() {
-      const container = document.getElementById('processingList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='processing_options[${processingIndex}][name]' placeholder='Новая услуга'>
-          </div>
-          <div class='form-group'>
-            <label>Цена (₽)</label>
-            <input type='number' name='processing_options[${processingIndex}][price]' placeholder='100'>
-          </div>
-        </div>
-
-        <div class='form-group'>
-          <label>Описание</label>
-          <input name='processing_options[${processingIndex}][description]' placeholder='Описание услуги'>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='processing_options[${processingIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Доступен</span>
-        </div>
-      `;
-      container.appendChild(item);
-      processingIndex++;
-    }
-
-    // Добавление способов доставки
-    function addDeliveryOption() {
-      const container = document.getElementById('deliveryList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='delivery_options[${deliveryIndex}][name]' placeholder='Экспресс доставка'>
-          </div>
-          <div class='form-group'>
-            <label>Цена (₽)</label>
-            <input type='number' name='delivery_options[${deliveryIndex}][price]' placeholder='500'>
-          </div>
-        </div>
-
-        <div class='form-group'>
-          <label>Описание</label>
-          <input name='delivery_options[${deliveryIndex}][description]' placeholder='Доставка в течение 2 часов'>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='delivery_options[${deliveryIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Доступен</span>
-        </div>
-      `;
-      container.appendChild(item);
-      deliveryIndex++;
-    }
-
-    // Добавление скидок
-    function addDiscount() {
-      const container = document.getElementById('discountsList');
-      const item = document.createElement('div');
-      item.className = 'config-item';
-      item.innerHTML = `
-        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
-
-        <div class='form-row-3'>
-          <div class='form-group'>
-            <label>Название</label>
-            <input name='discounts[${discountIndex}][name]' placeholder='От 300 фото'>
-          </div>
-          <div class='form-group'>
-            <label>От количества фото</label>
-            <input type='number' name='discounts[${discountIndex}][threshold]' placeholder='300'>
-          </div>
-          <div class='form-group'>
-            <label>Скидка (%)</label>
-            <input type='number' name='discounts[${discountIndex}][discount_percent]' min='0' max='99' placeholder='25'>
-          </div>
-        </div>
-
-        <div class='service-controls'>
-          <label class='toggle'>
-            <input type='checkbox' name='discounts[${discountIndex}][enabled]' checked>
-            <span class='slider'></span>
-          </label>
-          <span>Активна</span>
-        </div>
-      `;
-      container.appendChild(item);
-      discountIndex++;
-    }
-
-    // Управление услугами (из предыдущей версии)
     function addService() {
       const servicesList = document.getElementById('servicesList');
       const serviceItem = document.createElement('div');
@@ -1573,26 +2285,360 @@ $isLogin = !isset($_SESSION['is_admin']);
       }
     }
 
-    // Фильтрация заказов
-    function filterOrders(type) {
-      const rows = document.querySelectorAll('#ordersTable tbody tr');
-      const buttons = document.querySelectorAll('.filter-btn');
+    function openProductModal() {
+      document.getElementById('productModalTitle').textContent = 'Добавить товар';
+      document.getElementById('productForm').reset();
+      document.getElementById('productId').value = '';
+      document.getElementById('currentImage').innerHTML = '';
+      document.getElementById('productModal').classList.add('show');
+    }
 
-      buttons.forEach(btn => btn.classList.remove('active'));
-      event.target.classList.add('active');
+    function editProduct(product) {
+      document.getElementById('productModalTitle').textContent = 'Редактировать товар';
+      document.getElementById('productId').value = product.id;
+      document.getElementById('productName').value = product.name;
+      document.getElementById('productCategory').value = product.category;
+      document.getElementById('productPrice').value = product.price;
+      document.getElementById('productOldPrice').value = product.old_price || '';
+      document.getElementById('productDescription').value = product.description;
+      document.getElementById('productStock').value = product.stock;
+      document.getElementById('productEnabled').checked = product.enabled;
+      document.getElementById('productFeatured').checked = product.featured;
 
-      rows.forEach(row => {
-        if (type === 'all' || row.dataset.type === type) {
-          row.style.display = '';
-        } else {
-          row.style.display = 'none';
+      if (product.image) {
+        document.getElementById('currentImage').innerHTML =
+          '<div style="margin-top:8px"><img src="uploads/' + product.image + '" style="max-width:100px;border-radius:4px"><br><small>Текущее изображение</small></div>';
+      }
+
+      document.getElementById('productModal').classList.add('show');
+    }
+
+    function closeProductModal() {
+      document.getElementById('productModal').classList.remove('show');
+    }
+
+    // Добавление всех элементов фотоконструктора
+    function addSize() {
+      const container = document.getElementById('sizesList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='sizes[${sizeIndex}][name]' placeholder='13×18'>
+          </div>
+          <div class='form-group'>
+            <label>Ширина (см)</label>
+            <input type='number' step='0.1' name='sizes[${sizeIndex}][w]' placeholder='13'>
+          </div>
+          <div class='form-group'>
+            <label>Высота (см)</label>
+            <input type='number' step='0.1' name='sizes[${sizeIndex}][h]' placeholder='18'>
+          </div>
+          <div class='form-group'>
+            <label>Базовая цена (₽)</label>
+            <input type='number' name='sizes[${sizeIndex}][base]' placeholder='40'>
+          </div>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='sizes[${sizeIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Доступен</span>
+          <label class='toggle' style='margin-left: 20px;'>
+            <input type='checkbox' name='sizes[${sizeIndex}][popular]'>
+            <span class='slider'></span>
+          </label>
+          <span>Популярный</span>
+        </div>
+      `;
+      container.appendChild(item);
+      sizeIndex++;
+    }
+
+    function addPaper() {
+      const container = document.getElementById('papersList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='papers[${paperIndex}][name]' placeholder='Премиум'>
+          </div>
+          <div class='form-group'>
+            <label>Доплата (₽)</label>
+            <input type='number' name='papers[${paperIndex}][delta]' placeholder='20'>
+          </div>
+        </div>
+        <div class='form-group'>
+          <label>Описание</label>
+          <input name='papers[${paperIndex}][description]' placeholder='Премиум бумага повышенной плотности'>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='papers[${paperIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Доступен</span>
+        </div>
+      `;
+      container.appendChild(item);
+      paperIndex++;
+    }
+
+    function addCorrection() {
+      const container = document.getElementById('correctionsList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='corrections[${correctionIndex}][name]' placeholder='Премиум коррекция'>
+          </div>
+          <div class='form-group'>
+            <label>Доплата (₽)</label>
+            <input type='number' name='corrections[${correctionIndex}][delta]' placeholder='100'>
+          </div>
+        </div>
+        <div class='form-group'>
+          <label>Описание</label>
+          <input name='corrections[${correctionIndex}][description]' placeholder='Профессиональная обработка дизайнером'>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='corrections[${correctionIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Доступен</span>
+        </div>
+      `;
+      container.appendChild(item);
+      correctionIndex++;
+    }
+
+    function addProcessingOption() {
+      const container = document.getElementById('processingList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='processing_options[${processingIndex}][name]' placeholder='Новая услуга'>
+          </div>
+          <div class='form-group'>
+            <label>Цена (₽)</label>
+            <input type='number' name='processing_options[${processingIndex}][price]' placeholder='100'>
+          </div>
+        </div>
+        <div class='form-group'>
+          <label>Описание</label>
+          <input name='processing_options[${processingIndex}][description]' placeholder='Описание услуги'>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='processing_options[${processingIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Доступен</span>
+        </div>
+      `;
+      container.appendChild(item);
+      processingIndex++;
+    }
+
+    function addDeliveryOption() {
+      const container = document.getElementById('deliveryList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='delivery_options[${deliveryIndex}][name]' placeholder='Экспресс доставка'>
+          </div>
+          <div class='form-group'>
+            <label>Цена (₽)</label>
+            <input type='number' name='delivery_options[${deliveryIndex}][price]' placeholder='500'>
+          </div>
+        </div>
+        <div class='form-group'>
+          <label>Описание</label>
+          <input name='delivery_options[${deliveryIndex}][description]' placeholder='Доставка в течение 2 часов'>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='delivery_options[${deliveryIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Доступен</span>
+        </div>
+      `;
+      container.appendChild(item);
+      deliveryIndex++;
+    }
+
+    function addDiscount() {
+      const container = document.getElementById('discountsList');
+      const item = document.createElement('div');
+      item.className = 'config-item';
+      item.innerHTML = `
+        <button type='button' class='remove-config-item' onclick='removeConfigItem(this)'>×</button>
+        <div class='form-row-3'>
+          <div class='form-group'>
+            <label>Название</label>
+            <input name='discounts[${discountIndex}][name]' placeholder='От 300 фото'>
+          </div>
+          <div class='form-group'>
+            <label>От количества фото</label>
+            <input type='number' name='discounts[${discountIndex}][threshold]' placeholder='300'>
+          </div>
+          <div class='form-group'>
+            <label>Скидка (%)</label>
+            <input type='number' name='discounts[${discountIndex}][discount_percent]' min='0' max='99' placeholder='25'>
+          </div>
+        </div>
+        <div class='service-controls'>
+          <label class='toggle'>
+            <input type='checkbox' name='discounts[${discountIndex}][enabled]' checked>
+            <span class='slider'></span>
+          </label>
+          <span>Активна</span>
+        </div>
+      `;
+      container.appendChild(item);
+      discountIndex++;
+    }
+
+    function handleFileUpload(input, dropId, formId) {
+      if (input.files && input.files[0]) {
+        const file = input.files[0];
+        const drop = document.getElementById(dropId);
+        const form = document.getElementById(formId);
+
+        if (file.size > 10 * 1024 * 1024) {
+          alert('Файл слишком большой! Максимум 10 МБ.');
+          input.value = '';
+          return;
         }
-      });
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const content = drop.querySelector('.drop-content');
+          content.innerHTML = `
+            <img src='${e.target.result}' class='drop-preview' alt='Превью'>
+            <div class='drop-text'>Файл готов к загрузке</div>
+            <div class='drop-hint'>Нажмите для замены</div>
+          `;
+          drop.classList.add('has-image');
+        };
+        reader.readAsDataURL(file);
+
+        setTimeout(() => {
+          form.submit();
+        }, 500);
+      }
     }
 
-    function viewOrder(orderId) {
-      alert('Просмотр заказа: ' + orderId + '\nЗдесь можно добавить модальное окно с деталями заказа.');
+    function removeImage(dropId, type) {
+      if (confirm('Удалить изображение?')) {
+        const drop = document.getElementById(dropId);
+
+        if (type === 'logo') {
+          drop.querySelector('.drop-content').innerHTML = `
+            <div class='drop-icon'>🖼️</div>
+            <div class='drop-text'>Загрузить логотип</div>
+            <div class='drop-hint'>PNG, JPG, SVG до 10 МБ</div>
+          `;
+        } else {
+          drop.querySelector('.drop-content').innerHTML = `
+            <div class='drop-icon'>🎨</div>
+            <div class='drop-text'>Загрузить hero изображение</div>
+            <div class='drop-hint'>PNG, JPG до 10 МБ</div>
+          `;
+        }
+
+        drop.classList.remove('has-image');
+
+        const form = new FormData();
+        form.append('admin_save', '1');
+        form.append(type === 'logo' ? 'logo' : 'hero_image', '');
+        form.append(type === 'logo' ? 'logo' : 'hero_mode', type === 'logo' ? '' : 'svg');
+
+        fetch(location.href, {
+          method: 'POST',
+          body: form
+        }).then(() => {
+          location.reload();
+        });
+      }
     }
+
+    document.querySelectorAll('.drop').forEach(drop => {
+      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        drop.addEventListener(eventName, preventDefaults, false);
+      });
+
+      ['dragenter', 'dragover'].forEach(eventName => {
+        drop.addEventListener(eventName, () => drop.classList.add('hover'), false);
+      });
+
+      ['dragleave', 'drop'].forEach(eventName => {
+        drop.addEventListener(eventName, () => drop.classList.remove('hover'), false);
+      });
+
+      drop.addEventListener('drop', handleDrop, false);
+    });
+
+    function preventDefaults(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    function handleDrop(e) {
+      const dt = e.dataTransfer;
+      const files = dt.files;
+      const input = e.target.querySelector('input[type="file"]');
+
+      if (files.length > 0) {
+        input.files = files;
+        const changeEvent = new Event('change', { bubbles: true });
+        input.dispatchEvent(changeEvent);
+      }
+    }
+
+    document.addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal')) {
+        e.target.classList.remove('show');
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal.show').forEach(modal => {
+          modal.classList.remove('show');
+        });
+      }
+    });
+
+    document.addEventListener('DOMContentLoaded', function() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const tab = urlParams.get('tab') || 'orders';
+      const tabElement = document.querySelector(`[onclick*='${tab}']`);
+      if (tabElement) {
+        showTab(tab, tabElement);
+      }
+      console.log('ПОЛНАЯ объединенная админ-панель инициализирована');
+    });
   </script>
 </body>
 </html>
