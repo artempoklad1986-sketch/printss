@@ -1,0 +1,351 @@
+<?php
+mb_internal_encoding('UTF-8');
+date_default_timezone_set('Europe/Moscow');
+session_start();
+
+$BASE = __DIR__;
+$configFile = $BASE.'/config.json';
+$ordersLog = $BASE.'/orders.txt';
+
+// Загружаем конфиг
+$cfg = json_decode(@file_get_contents($configFile), true) ?? [];
+
+// Helpers
+function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8'); }
+
+function yukassa_check_payment($cfg, $payment_id){
+  if(empty($cfg['yukassa']['enabled'])) return [false, 'Payments disabled'];
+
+  $shop_id = $cfg['yukassa']['shop_id'];
+  $secret_key = $cfg['yukassa']['secret_key'];
+
+  if(!$shop_id || !$secret_key) return [false, 'Missing credentials'];
+
+  $url = "https://api.yookassa.ru/v3/payments/$payment_id";
+
+  $ch = curl_init($url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    'Authorization: Basic ' . base64_encode($shop_id . ':' . $secret_key)
+  ]);
+
+  $result = curl_exec($ch);
+  $error = curl_error($ch);
+  curl_close($ch);
+
+  if($error) return [false, 'CURL error: ' . $error];
+
+  $response = json_decode($result, true);
+  if(!$response) return [false, 'Invalid response: ' . $result];
+
+  return [true, $response];
+}
+
+function log_payment_status($path, $data){
+  @file_put_contents($path, '['.date('Y-m-d H:i:s').'] PAYMENT_STATUS: '.json_encode($data, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
+}
+
+function tg_send_message_cfg($cfg, $text){
+  if(empty($cfg['telegram']['enabled'])) return [false,'disabled'];
+  $token=$cfg['telegram']['token']??''; $chat=$cfg['telegram']['chat']??'';
+  if(!$token || !$chat) return [false,'no token/chat'];
+
+  $url='https://api.telegram.org/bot$token/sendMessage';
+  $ch=curl_init($url);
+  curl_setopt($ch,CURLOPT_RETURNTRANSFER,true);
+  curl_setopt($ch,CURLOPT_CONNECTTIMEOUT,10);
+  curl_setopt($ch,CURLOPT_TIMEOUT,20);
+  curl_setopt($ch,CURLOPT_POSTFIELDS,http_build_query([
+    'chat_id'=>$chat,
+    'text'=>$text,
+    'parse_mode'=>'HTML',
+    'disable_web_page_preview'=>true
+  ]));
+  $resp=curl_exec($ch); curl_close($ch);
+  return [true, null];
+}
+
+// Получаем данные о платеже
+$order_id = $_GET['order_id'] ?? '';
+$payment_id = $_GET['payment_id'] ?? '';
+$status = 'unknown';
+$amount = 0;
+$payment_info = null;
+
+if ($payment_id) {
+  list($payOk, $payResult) = yukassa_check_payment($cfg, $payment_id);
+  if ($payOk) {
+    $payment_info = $payResult;
+    $status = $payResult['status'] ?? 'unknown';
+    $amount = $payResult['amount']['value'] ?? 0;
+    $order_id = $payResult['metadata']['order_id'] ?? $order_id;
+
+    // Логируем статус платежа
+    log_payment_status($ordersLog, [
+      'payment_id' => $payment_id,
+      'order_id' => $order_id,
+      'status' => $status,
+      'amount' => $amount,
+      'timestamp' => date('Y-m-d H:i:s')
+    ]);
+
+    // Если платеж успешен, отправляем уведомления
+    if ($status === 'succeeded') {
+      $tgMsg = "💰 <b>Платеж получен!</b>\n\n";
+      $tgMsg .= "💳 Сумма: " . number_format($amount, 0, ',', ' ') . " ₽\n";
+      $tgMsg .= "🆔 Заказ: " . esc($order_id) . "\n";
+      $tgMsg .= "🆔 Платеж: " . esc($payment_id) . "\n";
+      $tgMsg .= "⏰ " . date('d.m.Y H:i:s') . "\n\n";
+      $tgMsg .= "✅ Статус: Успешно оплачен";
+
+      tg_send_message_cfg($cfg, $tgMsg);
+    }
+  }
+}
+
+// Тема оформления
+$T = $cfg['theme'] ?? [];
+$cardOpacity = is_numeric($T['card_opacity']) ? max(0.3, min(1, (float)$T['card_opacity'])) : 0.65;
+$blur = (int)($T['blur'] ?? 12);
+$radius = (int)($T['radius'] ?? 16);
+$shadow = (float)($T['shadow'] ?? 0.12);
+$container = (int)($T['container'] ?? 1200);
+$muted = $T['muted'] ?? '#5c6b84';
+$bg = $T['bg'] ?? '#f3f7ff';
+$text = $T['text'] ?? '#0e1220';
+$brandCol = $T['brand'] ?? '#FF8A00';
+$accentCol = $T['accent'] ?? '#2D5BFF';
+?>
+<!doctype html>
+<html lang='ru'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <title>Результат оплаты — <?=esc($cfg['brand'] ?? 'ПРИНТСС')?></title>
+  <style>
+    :root{
+      --bg: <?=esc($bg)?>;
+      --text: <?=esc($text)?>;
+      --muted: <?=esc($muted)?>;
+      --brand: <?=esc($brandCol)?>;
+      --accent: <?=esc($accentCol)?>;
+      --card: rgba(255,255,255, <?=esc(number_format($cardOpacity,2,'.',''))?>) ;
+      --glass-blur: <?=esc($blur)?>px;
+      --radius: <?=esc($radius)?>px;
+      --shadow: 0 10px 30px rgba(0,0,0, <?=esc(number_format($shadow,2,'.',''))?>);
+      --container: <?=esc($container)?>px;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;line-height:1.5}
+    body{
+      background:
+        radial-gradient(900px 300px at 70% -10%, rgba(45,91,255,.10), transparent 60%),
+        radial-gradient(700px 280px at 20% -20%, rgba(255,138,0,.12), transparent 70%),
+        var(--bg);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container{max-width:600px;width:100%}
+    .card{
+      background:var(--card);
+      border:1px solid rgba(0,0,0,.08);
+      border-radius:var(--radius);
+      backdrop-filter:blur(var(--glass-blur));
+      box-shadow:var(--shadow);
+      padding:40px;
+      text-align:center;
+    }
+    .status-icon{
+      font-size:64px;
+      margin-bottom:20px;
+      display:block;
+    }
+    .status-success{color:#28a745}
+    .status-pending{color:#ffc107}
+    .status-failed{color:#dc3545}
+    h1{font-size:28px;margin:0 0 10px;font-weight:700}
+    .amount{font-size:36px;font-weight:800;color:var(--brand);margin:20px 0}
+    .details{
+      background:rgba(0,0,0,.03);
+      border-radius:12px;
+      padding:20px;
+      margin:25px 0;
+      text-align:left;
+    }
+    .detail-row{
+      display:flex;
+      justify-content:space-between;
+      margin:8px 0;
+      padding:4px 0;
+    }
+    .detail-label{color:var(--muted);font-size:14px}
+    .detail-value{font-weight:600}
+    .buttons{
+      display:flex;
+      gap:12px;
+      justify-content:center;
+      flex-wrap:wrap;
+      margin-top:30px;
+    }
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:12px 20px;
+      border-radius:12px;
+      text-decoration:none;
+      font-weight:600;
+      transition:all 0.2s;
+      border:none;
+      cursor:pointer;
+    }
+    .btn-primary{
+      background:linear-gradient(135deg, var(--accent), #00C2FF);
+      color:#fff;
+    }
+    .btn-secondary{
+      background:var(--card);
+      color:var(--text);
+      border:1px solid rgba(0,0,0,.1);
+    }
+    .btn:hover{
+      transform:translateY(-1px);
+      box-shadow:0 6px 20px rgba(0,0,0,.15);
+    }
+    .message{
+      background:rgba(40,167,69,.1);
+      border:1px solid #28a745;
+      border-radius:8px;
+      padding:15px;
+      margin:20px 0;
+      color:#155724;
+    }
+    .message.warning{
+      background:rgba(255,193,7,.1);
+      border-color:#ffc107;
+      color:#856404;
+    }
+    .message.error{
+      background:rgba(220,53,69,.1);
+      border-color:#dc3545;
+      color:#721c24;
+    }
+    @media(max-width:480px){
+      .card{padding:30px 20px}
+      .amount{font-size:28px}
+      .buttons{flex-direction:column}
+    }
+  </style>
+</head>
+<body>
+  <div class='container'>
+    <div class='card'>
+      <?php if ($status === 'succeeded'): ?>
+        <div class='status-icon status-success'>✅</div>
+        <h1>Оплата прошла успешно!</h1>
+        <p>Ваш платеж был успешно обработан</p>
+
+        <?php if ($amount > 0): ?>
+          <div class='amount'><?=number_format($amount, 0, ',', ' ')?> ₽</div>
+        <?php endif; ?>
+
+        <div class='message'>
+          <strong>Спасибо за заказ!</strong><br>
+          Мы получили ваш платеж и приступаем к выполнению заказа. 
+          В ближайшее время с вами свяжется наш менеджер для уточнения деталей.
+        </div>
+
+      <?php elseif ($status === 'pending'): ?>
+        <div class='status-icon status-pending'>⏳</div>
+        <h1>Платеж обрабатывается</h1>
+        <p>Ваш платеж находится в обработке</p>
+
+        <div class='message warning'>
+          <strong>Обработка платежа</strong><br>
+          Платеж находится в обработке. Обычно это занимает несколько минут. 
+          Мы уведомим вас о результате.
+        </div>
+
+      <?php elseif ($status === 'canceled' || $status === 'failed'): ?>
+        <div class='status-icon status-failed'>❌</div>
+        <h1>Платеж не прошел</h1>
+        <p>К сожалению, не удалось обработать ваш платеж</p>
+
+        <div class='message error'>
+          <strong>Платеж отклонен</strong><br>
+          Попробуйте еще раз или выберите другой способ оплаты. 
+          Если проблема повторяется, обратитесь в службу поддержки.
+        </div>
+
+      <?php else: ?>
+        <div class='status-icon status-pending'>❓</div>
+        <h1>Проверяем статус платежа</h1>
+        <p>Пожалуйста, подождите...</p>
+
+        <div class='message warning'>
+          <strong>Проверка статуса</strong><br>
+          Мы проверяем статус вашего платежа. Если у вас есть вопросы, 
+          обратитесь к нашему менеджеру.
+        </div>
+      <?php endif; ?>
+
+      <?php if ($order_id || $payment_id): ?>
+        <div class='details'>
+          <?php if ($order_id): ?>
+            <div class='detail-row'>
+              <span class='detail-label'>Номер заказа:</span>
+              <span class='detail-value'><?=esc($order_id)?></span>
+            </div>
+          <?php endif; ?>
+
+          <?php if ($payment_id): ?>
+            <div class='detail-row'>
+              <span class='detail-label'>ID платежа:</span>
+              <span class='detail-value'><?=esc($payment_id)?></span>
+            </div>
+          <?php endif; ?>
+
+          <div class='detail-row'>
+            <span class='detail-label'>Время:</span>
+            <span class='detail-value'><?=date('d.m.Y H:i:s')?></span>
+          </div>
+
+          <?php if ($payment_info && isset($payment_info['payment_method']['type'])): ?>
+            <div class='detail-row'>
+              <span class='detail-label'>Способ оплаты:</span>
+              <span class='detail-value'><?=esc($payment_info['payment_method']['type'])?></span>
+            </div>
+          <?php endif; ?>
+        </div>
+      <?php endif; ?>
+
+      <div class='buttons'>
+        <a href='/' class='btn btn-primary'>🏠 На главную</a>
+        <a href='products.php' class='btn btn-secondary'>🛍️ Товары</a>
+        <a href='photoconstructor.php' class='btn btn-secondary'>📸 Фото онлайн</a>
+        <a href='tel:<?=esc($cfg['phone_raw'] ?? '+79522003990')?>' class='btn btn-secondary'>
+          📞 <?=esc($cfg['phone_display'] ?? '+7 (952) 200-39-90')?>
+        </a>
+      </div>
+
+      <div style='margin-top:30px;padding-top:20px;border-top:1px solid rgba(0,0,0,.1);color:var(--muted);font-size:14px'>
+        <p><strong><?=esc($cfg['brand'] ?? 'Фотоцентр ПРИНТСС')?></strong></p>
+        <p><?=esc($cfg['address'] ?? 'г. Сосновый Бор, ул. Красных Фортов, 49')?></p>
+        <p>Если у вас есть вопросы, звоните: <strong><?=esc($cfg['phone_display'] ?? '+7 (952) 200-39-90')?></strong></p>
+      </div>
+    </div>
+  </div>
+
+  <?php if ($status === 'pending'): ?>
+  <script>
+    // Автообновление статуса для pending платежей
+    setTimeout(() => {
+      location.reload();
+    }, 30000); // Обновляем каждые 30 секунд для pending статуса
+  </script>
+  <?php endif; ?>
+</body>
+</html>
