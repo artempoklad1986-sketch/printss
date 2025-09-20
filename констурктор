@@ -1,0 +1,965 @@
+<?php
+mb_internal_encoding('UTF-8');
+date_default_timezone_set('Europe/Moscow');
+session_start();
+
+$BASE = __DIR__;
+$configFile = $BASE.'/config.json';
+$uploadsDir = $BASE.'/uploads';
+$ordersLog = $BASE.'/orders.txt';
+
+// Создаем папку для загрузок если не существует
+if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0775, true);
+
+// Загружаем конфиг
+$cfg = json_decode(@file_get_contents($configFile), true) ?? [];
+
+// Helpers
+function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8'); }
+function sanitize_text($s){ return trim(filter_var($s, FILTER_SANITIZE_FULL_SPECIAL_CHARS)); }
+
+// Конфиг фотоконструктора
+$photoConfig = [
+  'sizes' => [
+    ['name' => '10×15', 'w' => 10, 'h' => 15, 'base' => 30],
+    ['name' => '15×21', 'w' => 15, 'h' => 21, 'base' => 50],
+    ['name' => 'A4', 'w' => 21, 'h' => 29.7, 'base' => 120],
+    ['name' => 'A3', 'w' => 29.7, 'h' => 42, 'base' => 200],
+    ['name' => '30×40', 'w' => 30, 'h' => 40, 'base' => 300],
+    ['name' => '50×70', 'w' => 50, 'h' => 70, 'base' => 800]
+  ],
+  'papers' => [
+    ['name' => 'Матовая', 'delta' => 0],
+    ['name' => 'Глянец', 'delta' => 10]
+  ],
+  'corrections' => [
+    ['name' => 'Нет', 'delta' => 0],
+    ['name' => 'Легкая', 'delta' => 15],
+    ['name' => 'Профессиональная', 'delta' => 50]
+  ]
+];
+
+// API для конфига (для совместимости со старым кодом)
+if (isset($_GET['api']) && $_GET['api'] === 'config') {
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode($photoConfig);
+  exit;
+}
+
+// Обработка заказа фото
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mode'] === 'photo_order') {
+  header('Content-Type: application/json; charset=utf-8');
+
+  try {
+    $name = sanitize_text($_POST['name'] ?? '');
+    $email = sanitize_text($_POST['email'] ?? '');
+    $phone = sanitize_text($_POST['phone'] ?? '');
+    $comment = sanitize_text($_POST['comment'] ?? '');
+    $size = sanitize_text($_POST['size'] ?? '');
+    $paper = sanitize_text($_POST['paper'] ?? '');
+    $qty = max(1, (int)($_POST['qty'] ?? 1));
+    $correction = sanitize_text($_POST['correction'] ?? '');
+    $paymentMethod = sanitize_text($_POST['payment_method'] ?? 'offline');
+
+    if (!$name || !$phone) {
+      throw new Exception('Укажите имя и телефон');
+    }
+
+    // Обработка загруженных фото
+    $uploadedPhotos = [];
+    $photoCount = 0;
+
+    if (isset($_FILES['photos']) && is_array($_FILES['photos']['name'])) {
+      $totalFiles = count($_FILES['photos']['name']);
+
+      for ($i = 0; $i < min($totalFiles, 100); $i++) { // Максимум 100 фото
+        if ($_FILES['photos']['error'][$i] === UPLOAD_ERR_OK) {
+          $tmpPath = $_FILES['photos']['tmp_name'][$i];
+          $originalName = $_FILES['photos']['name'][$i];
+
+          // Проверяем тип файла
+          $imageInfo = @getimagesize($tmpPath);
+          if ($imageInfo === false) continue;
+
+          // Генерируем уникальное имя файла
+          $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+          if (!in_array($ext, ['jpg', 'jpeg', 'png', 'heic', 'heif'])) continue;
+
+          $newName = 'photo_' . date('Ymd_His') . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+          $newPath = $uploadsDir . '/' . $newName;
+
+          if (move_uploaded_file($tmpPath, $newPath)) {
+            $uploadedPhotos[] = $newName;
+            $photoCount++;
+          }
+        }
+      }
+    }
+
+    if ($photoCount === 0) {
+      throw new Exception('Не удалось загрузить ни одного фото');
+    }
+
+    // Расчет стоимости
+    $sizeConfig = null;
+    foreach ($photoConfig['sizes'] as $s) {
+      if ($s['name'] === $size) {
+        $sizeConfig = $s;
+        break;
+      }
+    }
+
+    $paperConfig = null;
+    foreach ($photoConfig['papers'] as $p) {
+      if ($p['name'] === $paper) {
+        $paperConfig = $p;
+        break;
+      }
+    }
+
+    $correctionConfig = null;
+    foreach ($photoConfig['corrections'] as $c) {
+      if ($c['name'] === $correction) {
+        $correctionConfig = $c;
+        break;
+      }
+    }
+
+    $basePrice = $sizeConfig['base'] ?? 30;
+    $paperDelta = $paperConfig['delta'] ?? 0;
+    $correctionDelta = $correctionConfig['delta'] ?? 0;
+
+    $totalPrice = ($basePrice + $paperDelta + $correctionDelta) * $qty * $photoCount;
+
+    // Создаем заказ
+    $orderId = 'photo_' . time() . '_' . rand(1000, 9999);
+
+    $order = [
+      'id' => $orderId,
+      'type' => 'photo_constructor',
+      'ts' => date('Y-m-d H:i:s'),
+      'name' => $name,
+      'phone' => $phone,
+      'email' => $email,
+      'comment' => $comment,
+      'size' => $size,
+      'paper' => $paper,
+      'qty_per_photo' => $qty,
+      'correction' => $correction,
+      'photo_count' => $photoCount,
+      'photos' => $uploadedPhotos,
+      'estimated_price' => $totalPrice,
+      'payment_method' => $paymentMethod,
+      'status' => $paymentMethod === 'online' ? 'pending_payment' : 'new',
+      'ip' => $_SERVER['REMOTE_ADDR'] ?? ''
+    ];
+
+    // Логируем заказ
+    @file_put_contents($ordersLog, '['.date('Y-m-d H:i:s').'] '.json_encode($order, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
+
+    // Подготавливаем ответ
+    $response = [
+      'ok' => true,
+      'order_id' => $orderId,
+      'photo_count' => $photoCount,
+      'estimated_price' => $totalPrice
+    ];
+
+    // Обработка онлайн оплаты
+    if ($paymentMethod === 'online' && !empty($cfg['yukassa']['enabled']) && !empty($cfg['yukassa']['services']['photo_constructor'])) {
+      // Функция создания платежа ЮКасса
+      $shop_id = $cfg['yukassa']['shop_id'];
+      $secret_key = $cfg['yukassa']['secret_key'];
+      $return_url = $cfg['yukassa']['return_url'] ?? ($cfg['site'] . '/payment_result.php');
+
+      if ($shop_id && $secret_key && $totalPrice > 0) {
+        $url = 'https://api.yookassa.ru/v3/payments';
+
+        $data = [
+          'amount' => ['value' => number_format($totalPrice, 2, '.', ''), 'currency' => 'RUB'],
+          'confirmation' => ['type' => 'redirect', 'return_url' => $return_url . '?order_id=' . urlencode($orderId)],
+          'description' => 'Фотоконструктор — ' . $photoCount . ' фото',
+          'metadata' => ['order_id' => $orderId],
+          'capture' => true
+        ];
+
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+          'Content-Type: application/json',
+          'Idempotence-Key: ' . uniqid(),
+          'Authorization: Basic ' . base64_encode($shop_id . ':' . $secret_key)
+        ]);
+
+        $result = curl_exec($ch);
+        curl_close($ch);
+
+        if ($result) {
+          $paymentResponse = json_decode($result, true);
+          if ($paymentResponse && isset($paymentResponse['confirmation']['confirmation_url'])) {
+            $response['payment'] = true;
+            $response['payment_url'] = $paymentResponse['confirmation']['confirmation_url'];
+            $response['payment_id'] = $paymentResponse['id'];
+            $response['message'] = 'Заказ создан. Переходим к оплате...';
+          }
+        }
+      }
+    }
+
+    // Отправка уведомлений (только для оффлайн заказов или при ошибке создания платежа)
+    if ($paymentMethod !== 'online' || !isset($response['payment'])) {
+      // Email уведомление
+      $emailBody = "Заказ фотоконструктора\n\n";
+      $emailBody .= "ID заказа: $orderId\n";
+      $emailBody .= "Клиент: $name\n";
+      $emailBody .= "Телефон: $phone\n";
+      $emailBody .= "Email: $email\n\n";
+      $emailBody .= "Параметры:\n";
+      $emailBody .= "Размер: $size\n";
+      $emailBody .= "Бумага: $paper\n";
+      $emailBody .= "Тираж на фото: $qty\n";
+      $emailBody .= "Цветокоррекция: $correction\n";
+      $emailBody .= "Количество фото: $photoCount\n";
+      $emailBody .= "Примерная стоимость: " . number_format($totalPrice, 0, ',', ' ') . " ₽\n\n";
+      if ($comment) $emailBody .= "Комментарий: $comment\n\n";
+      $emailBody .= "Фото загружены в папку uploads/\n";
+
+      @mail($cfg['email_to'] ?? 'artcopy78@bk.ru', 
+            '=?UTF-8?B?'.base64_encode('Фотоконструктор #'.$orderId).'?=',
+            $emailBody,
+            'From: '.$cfg['email_from']."\r\nContent-Type: text/plain; charset=UTF-8\r\n");
+
+      // Telegram уведомление  
+      if (!empty($cfg['telegram']['enabled']) && !empty($cfg['telegram']['token']) && !empty($cfg['telegram']['chat'])) {
+        $tgMsg = "📸 <b>Фотоконструктор</b>\n\n";
+        $tgMsg .= "🆔 $orderId\n";
+        $tgMsg .= "👤 $name\n";
+        $tgMsg .= "📞 $phone\n";
+        if ($email) $tgMsg .= "✉️ $email\n";
+        $tgMsg .= "\n📋 <b>Параметры:</b>\n";
+        $tgMsg .= "📐 $size\n";
+        $tgMsg .= "📄 $paper\n";
+        $tgMsg .= "🔢 Тираж: $qty на фото\n";
+        $tgMsg .= "🎨 $correction\n";
+        $tgMsg .= "📷 Фото: $photoCount шт\n";
+        $tgMsg .= "\n💰 <b>~" . number_format($totalPrice, 0, ',', ' ') . " ₽</b>\n";
+        if ($comment) $tgMsg .= "\n💬 $comment";
+
+        $url = 'https://api.telegram.org/bot'.$cfg['telegram']['token'].'/sendMessage';
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+          'chat_id' => $cfg['telegram']['chat'],
+          'text' => $tgMsg,
+          'parse_mode' => 'HTML'
+        ]));
+        curl_exec($ch);
+        curl_close($ch);
+      }
+
+      $response['message'] = 'Заказ отправлен! Мы свяжемся с вами для уточнения деталей.';
+    }
+
+    echo json_encode($response);
+
+  } catch (Exception $e) {
+    echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
+  }
+  exit;
+}
+
+// Тема оформления
+$T = $cfg['theme'] ?? [];
+$cardOpacity = is_numeric($T['card_opacity']) ? max(0.3, min(1, (float)$T['card_opacity'])) : 0.65;
+$blur = (int)($T['blur'] ?? 12);
+$radius = (int)($T['radius'] ?? 16);
+$shadow = (float)($T['shadow'] ?? 0.12);
+$container = (int)($T['container'] ?? 1200);
+$muted = $T['muted'] ?? '#5c6b84';
+$bg = $T['bg'] ?? '#f3f7ff';
+$text = $T['text'] ?? '#0e1220';
+$brandCol = $T['brand'] ?? '#FF8A00';
+$accentCol = $T['accent'] ?? '#2D5BFF';
+?>
+<!doctype html>
+<html lang='ru'>
+<head>
+  <meta charset='utf-8'>
+  <title>Фотоконструктор — <?=esc($cfg['brand'] ?? 'ПРИНТСС')?></title>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <meta name='description' content='Онлайн заказ фотопечати. Загрузите фото, выберите размер и параметры печати. Быстро и удобно.'>
+
+  <style>
+    :root{
+      --bg: <?=esc($bg)?>;
+      --text: <?=esc($text)?>;
+      --muted: <?=esc($muted)?>;
+      --brand: <?=esc($brandCol)?>;
+      --accent: <?=esc($accentCol)?>;
+      --card: rgba(255,255,255, <?=esc(number_format($cardOpacity,2,'.',''))?>) ;
+      --glass-blur: <?=esc($blur)?>px;
+      --radius: <?=esc($radius)?>px;
+      --shadow: 0 10px 30px rgba(0,0,0, <?=esc(number_format($shadow,2,'.',''))?>);
+      --container: <?=esc($container)?>px;
+    }
+
+    *{box-sizing:border-box}
+    body{
+      margin:0; 
+      font-family:Inter,system-ui,Segoe UI,Arial; 
+      color:var(--text); 
+      background:var(--bg);
+      background:
+        radial-gradient(900px 300px at 70% -10%, rgba(45,91,255,.08), transparent 60%),
+        radial-gradient(700px 280px at 20% -20%, rgba(255,138,0,.10), transparent 70%),
+        var(--bg);
+      line-height: 1.5;
+    }
+
+    .topbar{
+      position:sticky;
+      top:0;
+      z-index:50;
+      background:var(--card);
+      backdrop-filter:blur(var(--glass-blur)) saturate(160%);
+      border-bottom:1px solid rgba(0,0,0,.08);
+      padding: 12px 0;
+    }
+
+    .topflex{
+      max-width:var(--container);
+      margin:0 auto;
+      padding:0 20px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap
+    }
+
+    .logo{
+      display:flex;
+      gap:12px;
+      align-items:center;
+      text-decoration:none;
+      color:inherit;
+    }
+
+    .logo-badge{
+      width:40px;
+      height:40px;
+      border-radius:10px;
+      background:linear-gradient(135deg, var(--brand), #FFB14D);
+      display:grid;
+      place-items:center;
+      color:#000;
+      font-weight:800;
+      font-size:16px;
+    }
+
+    .logo-title{
+      font-weight:700;
+      font-size:18px;
+    }
+
+    .nav{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+
+    .nav a{
+      color:inherit;
+      padding:8px 12px;
+      border-radius:8px;
+      font-weight:500;
+      transition:all 0.2s;
+      text-decoration:none;
+      font-size:14px;
+    }
+
+    .nav a:hover{
+      background:rgba(0,0,0,.06);
+    }
+
+    .wrap{
+      max-width:var(--container);
+      margin:20px auto;
+      display:grid;
+      grid-template-columns:1.2fr 0.8fr;
+      gap:20px;
+      padding:0 20px;
+    }
+
+    @media(max-width:1000px){
+      .wrap{grid-template-columns:1fr}
+    }
+
+    .card{
+      background:var(--card);
+      border:1px solid rgba(0,0,0,.08);
+      border-radius:var(--radius);
+      backdrop-filter:blur(var(--glass-blur));
+      box-shadow:var(--shadow);
+      padding:24px;
+    }
+
+    h2{
+      margin:0 0 16px;
+      font-size:20px;
+      font-weight:700;
+    }
+
+    .form-group{
+      margin-bottom:16px;
+    }
+
+    .form-group label{
+      display:block;
+      color:var(--text);
+      font-size:14px;
+      font-weight:600;
+      margin-bottom:6px;
+    }
+
+    input[type='text'], input[type='email'], input[type='number'], select, textarea{
+      width:100%;
+      padding:12px;
+      border-radius:8px;
+      border:1px solid rgba(0,0,0,.15);
+      background:#fff;
+      color:var(--text);
+      font-size:14px;
+      transition: border-color 0.2s;
+    }
+
+    input:focus, select:focus, textarea:focus{
+      border-color:var(--accent);
+      outline:none;
+    }
+
+    textarea{
+      min-height:80px;
+      resize:vertical;
+    }
+
+    .uploader{
+      border:2px dashed rgba(0,0,0,.2);
+      border-radius:12px;
+      padding:30px 20px;
+      text-align:center;
+      background:rgba(0,0,0,.02);
+      position:relative;
+      transition: all 0.3s;
+    }
+
+    .uploader.dragover{
+      border-color:var(--accent);
+      background:rgba(45,91,255,.04);
+    }
+
+    .uploader input[type=file]{
+      position:absolute;
+      inset:0;
+      opacity:0;
+      cursor:pointer;
+    }
+
+    .uploader .hint{
+      color:var(--muted);
+      font-size:14px;
+    }
+
+    .uploader .icon{
+      font-size:48px;
+      margin-bottom:12px;
+      color:var(--accent);
+    }
+
+    .previews{
+      margin-top:20px;
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(120px, 1fr));
+      gap:12px;
+    }
+
+    .thumb{
+      border:1px solid rgba(0,0,0,.1);
+      border-radius:8px;
+      overflow:hidden;
+      background:#fff;
+      box-shadow:0 2px 8px rgba(0,0,0,.08);
+    }
+
+    .thumb .img{
+      width:100%;
+      height:120px;
+      background:#f8f9fa center/cover no-repeat;
+    }
+
+    .calc{
+      margin-top:16px;
+      padding:16px;
+      background:rgba(255,138,0,.08);
+      border-radius:8px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+
+    .calc #price{
+      font-weight:800;
+      font-size:24px;
+      color:var(--brand);
+    }
+
+    .note{
+      color:var(--muted);
+      font-size:13px;
+      margin-top:8px;
+    }
+
+    .btn{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:12px 20px;
+      border-radius:8px;
+      text-decoration:none;
+      font-weight:600;
+      transition:all 0.2s;
+      border:none;
+      cursor:pointer;
+      font-size:14px;
+    }
+
+    .btn-primary{
+      background:linear-gradient(135deg, var(--accent), #00C2FF);
+      color:#fff;
+    }
+
+    .btn-secondary{
+      background:var(--card);
+      color:var(--text);
+      border:1px solid rgba(0,0,0,.1);
+    }
+
+    .btn:hover{
+      transform:translateY(-1px);
+      box-shadow:0 4px 12px rgba(0,0,0,.2);
+    }
+
+    .btn:disabled{
+      opacity:0.6;
+      cursor:not-allowed;
+      transform:none;
+    }
+
+    .msg{
+      margin-top:12px;
+      font-size:14px;
+      padding:12px;
+      border-radius:8px;
+    }
+
+    .msg.success{
+      background:#d4edda;
+      color:#155724;
+      border:1px solid #c3e6cb;
+    }
+
+    .msg.error{
+      background:#f8d7da;
+      color:#721c24;
+      border:1px solid #f5c6cb;
+    }
+
+    .payment-methods{
+      margin:16px 0;
+      padding:16px;
+      background:rgba(0,0,0,.03);
+      border-radius:8px;
+    }
+
+    .payment-option{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin:8px 0;
+    }
+
+    .payment-option input[type=radio]{
+      margin:0;
+      width:auto;
+    }
+
+    @media(max-width:768px){
+      .topflex{
+        flex-direction:column;
+        text-align:center;
+      }
+      .nav{
+        justify-content:center;
+      }
+      .wrap{
+        padding:0 16px;
+        gap:16px;
+      }
+      .card{
+        padding:20px;
+      }
+      .previews{
+        grid-template-columns:repeat(auto-fill, minmax(100px, 1fr));
+        gap:8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class='topbar'>
+    <div class='topflex'>
+      <a href='/' class='logo'>
+        <div class='logo-badge'>П</div>
+        <div>
+          <div class='logo-title'><?=esc($cfg['brand'] ?? 'ПРИНТСС')?></div>
+          <div style='font-size:12px;color:var(--muted)'>Фотоконструктор</div>
+        </div>
+      </a>
+
+      <nav class='nav'>
+        <a href='/'>🏠 Главная</a>
+        <a href='products.php'>🛍️ Товары</a>
+        <a href='tel:<?=esc($cfg['phone_raw'] ?? '+79522003990')?>'><?=esc($cfg['phone_display'] ?? '+7 (952) 200-39-90')?></a>
+      </nav>
+    </div>
+  </header>
+
+  <main class='wrap'>
+    <section class='card'>
+      <h2>📸 Загрузите фото</h2>
+      <p style='color:var(--muted);margin-bottom:20px'>
+        Выберите до 100 фотографий для печати. Поддерживаются форматы JPG, PNG, HEIC.
+      </p>
+
+      <div class='uploader' id='uploader'>
+        <input type='file' id='files' accept='image/*' multiple>
+        <div class='icon'>📷</div>
+        <div class='hint'>Перетащите фото сюда или нажмите для выбора</div>
+        <div style='font-size:12px;color:var(--muted);margin-top:8px'>
+          Максимум 100 файлов, до 10 МБ каждый
+        </div>
+      </div>
+
+      <div id='previews' class='previews'></div>
+    </section>
+
+    <section class='card'>
+      <h2>⚙️ Параметры печати</h2>
+
+      <div class='form-group'>
+        <label>Размер</label>
+        <select id='size'></select>
+      </div>
+
+      <div class='form-group'>
+        <label>Бумага</label>
+        <select id='paper'></select>
+      </div>
+
+      <div class='form-group'>
+        <label>Тираж на каждое фото</label>
+        <input type='number' id='qty' min='1' value='1'>
+      </div>
+
+      <div class='form-group'>
+        <label>Цветокоррекция</label>
+        <select id='correction'></select>
+      </div>
+
+      <div class='calc'>
+        <div>
+          <div style='font-size:14px;color:var(--muted)'>Примерная стоимость:</div>
+          <div id='price'>0 ₽</div>
+        </div>
+      </div>
+
+      <div class='note'>
+        💡 Точная стоимость будет рассчитана менеджером с учетом всех параметров и пожеланий.
+      </div>
+
+      <h2 style='margin-top:24px'>💬 Комментарий</h2>
+      <textarea id='comment' placeholder='Укажите особые пожелания: печать без полей, кадрирование, коррекция и т.д.'></textarea>
+
+      <h2 style='margin-top:24px'>📞 Контакты</h2>
+
+      <div class='form-group'>
+        <label>Ваше имя *</label>
+        <input type='text' id='name' placeholder='Иван Иванов' required>
+      </div>
+
+      <div class='form-group'>
+        <label>Телефон *</label>
+        <input type='text' id='phone' placeholder='+7 (999) 123-45-67' required>
+      </div>
+
+      <div class='form-group'>
+        <label>Email</label>
+        <input type='email' id='email' placeholder='ivan@example.com'>
+      </div>
+
+      <?php if (!empty($cfg['yukassa']['enabled']) && !empty($cfg['yukassa']['services']['photo_constructor'])): ?>
+      <div class='payment-methods'>
+        <div style='font-weight:600;margin-bottom:8px'>💳 Способ оплаты:</div>
+        <div class='payment-option'>
+          <input type='radio' id='payment_offline' name='payment_method' value='offline' checked>
+          <label for='payment_offline'>При получении</label>
+        </div>
+        <div class='payment-option'>
+          <input type='radio' id='payment_online' name='payment_method' value='online'>
+          <label for='payment_online'>Онлайн оплата (ЮКасса)</label>
+        </div>
+      </div>
+      <?php endif; ?>
+
+      <button id='btnSend' class='btn btn-primary' style='width:100%'>
+        📤 Отправить заказ
+      </button>
+
+      <div id='msg' class='msg' style='display:none'></div>
+    </section>
+  </main>
+
+  <script>
+    // Конфиг
+    const CONFIG = <?=json_encode($photoConfig, JSON_UNESCAPED_UNICODE)?>;
+    const MAX_PHOTOS = 100;
+
+    const files = document.getElementById('files');
+    const previews = document.getElementById('previews');
+    const priceEl = document.getElementById('price');
+    const uploader = document.getElementById('uploader');
+
+    // Инициализация селекторов
+    function fillSelectors() {
+      const sizeSelect = document.getElementById('size');
+      const paperSelect = document.getElementById('paper');
+      const correctionSelect = document.getElementById('correction');
+
+      sizeSelect.innerHTML = '';
+      CONFIG.sizes.forEach(size => {
+        const option = document.createElement('option');
+        option.value = size.name;
+        option.textContent = size.name;
+        sizeSelect.appendChild(option);
+      });
+
+      paperSelect.innerHTML = '';
+      CONFIG.papers.forEach(paper => {
+        const option = document.createElement('option');
+        option.value = paper.name;
+        option.textContent = paper.name;
+        paperSelect.appendChild(option);
+      });
+
+      correctionSelect.innerHTML = '';
+      CONFIG.corrections.forEach(correction => {
+        const option = document.createElement('option');
+        option.value = correction.name;
+        option.textContent = correction.name;
+        correctionSelect.appendChild(option);
+      });
+    }
+
+    // Расчет стоимости
+    function calcPrice() {
+      const sizeName = document.getElementById('size').value;
+      const paperName = document.getElementById('paper').value;
+      const qty = parseInt(document.getElementById('qty').value || '1');
+      const corrName = document.getElementById('correction').value;
+      const photoCount = previews.querySelectorAll('.thumb').length;
+
+      const size = CONFIG.sizes.find(s => s.name === sizeName) || CONFIG.sizes[0];
+      const paper = CONFIG.papers.find(p => p.name === paperName) || CONFIG.papers[0];
+      const correction = CONFIG.corrections.find(c => c.name === corrName) || CONFIG.corrections[0];
+
+      const total = (size.base + paper.delta + correction.delta) * qty * photoCount;
+      priceEl.textContent = total.toLocaleString('ru-RU') + ' ₽';
+    }
+
+    // Добавление превью фото
+    function addThumb(file) {
+      if (!file.type.startsWith('image/')) return;
+
+      const url = URL.createObjectURL(file);
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      div.innerHTML = `<div class='img' style='background-image:url("${url}")'></div>`;
+      previews.appendChild(div);
+    }
+
+    // Обработка выбора файлов
+    files.addEventListener('change', () => {
+      const fileList = [...files.files];
+      const limitedList = fileList.slice(0, MAX_PHOTOS);
+
+      previews.innerHTML = '';
+      limitedList.forEach(addThumb);
+
+      if (fileList.length > MAX_PHOTOS) {
+        showMessage(`Выбрано ${fileList.length} файлов. Будут загружены первые ${MAX_PHOTOS}.`, 'error');
+      }
+
+      calcPrice();
+    });
+
+    // Drag & Drop
+    uploader.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploader.classList.add('dragover');
+    });
+
+    uploader.addEventListener('dragleave', () => {
+      uploader.classList.remove('dragover');
+    });
+
+    uploader.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploader.classList.remove('dragover');
+
+      const droppedFiles = [...e.dataTransfer.files];
+      const limitedFiles = droppedFiles.slice(0, MAX_PHOTOS);
+
+      // Создаем новый FileList
+      const dt = new DataTransfer();
+      limitedFiles.forEach(file => dt.items.add(file));
+      files.files = dt.files;
+
+      previews.innerHTML = '';
+      limitedFiles.forEach(addThumb);
+
+      if (droppedFiles.length > MAX_PHOTOS) {
+        showMessage(`Перетащено ${droppedFiles.length} файлов. Будут загружены первые ${MAX_PHOTOS}.`, 'error');
+      }
+
+      calcPrice();
+    });
+
+    // Слушатели изменений параметров
+    ['size', 'paper', 'qty', 'correction'].forEach(id => {
+      document.getElementById(id).addEventListener('change', calcPrice);
+    });
+
+    // Отправка формы
+    document.getElementById('btnSend').addEventListener('click', async () => {
+      const fileList = [...files.files];
+      const limitedFiles = fileList.slice(0, MAX_PHOTOS);
+
+      if (!limitedFiles.length) {
+        showMessage('Загрузите хотя бы одно фото', 'error');
+        return;
+      }
+
+      const name = document.getElementById('name').value.trim();
+      const phone = document.getElementById('phone').value.trim();
+
+      if (!name || !phone) {
+        showMessage('Заполните имя и телефон', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('btnSend');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Отправка...';
+
+      try {
+        const fd = new FormData();
+        fd.append('mode', 'photo_order');
+
+        // Добавляем фото
+        limitedFiles.forEach(file => {
+          fd.append('photos[]', file);
+        });
+
+        // Добавляем параметры
+        fd.append('size', document.getElementById('size').value);
+        fd.append('paper', document.getElementById('paper').value);
+        fd.append('qty', document.getElementById('qty').value);
+        fd.append('correction', document.getElementById('correction').value);
+        fd.append('name', name);
+        fd.append('phone', phone);
+        fd.append('email', document.getElementById('email').value.trim());
+        fd.append('comment', document.getElementById('comment').value.trim());
+
+        // Способ оплаты
+        const paymentMethodEl = document.querySelector('input[name="payment_method"]:checked');
+        if (paymentMethodEl) {
+          fd.append('payment_method', paymentMethodEl.value);
+        }
+
+        const response = await fetch(location.href, {
+          method: 'POST',
+          body: fd
+        });
+
+        const result = await response.json();
+
+        if (result.ok) {
+          let message = `✅ Заказ отправлен! ID: ${result.order_id}`;
+          if (result.photo_count) {
+            message += `\nФото: ${result.photo_count} шт`;
+          }
+          if (result.estimated_price) {
+            message += `\nПримерная стоимость: ${result.estimated_price.toLocaleString('ru-RU')} ₽`;
+          }
+
+          showMessage(message, 'success');
+
+          // Очищаем форму
+          files.value = '';
+          previews.innerHTML = '';
+          document.getElementById('name').value = '';
+          document.getElementById('phone').value = '';
+          document.getElementById('email').value = '';
+          document.getElementById('comment').value = '';
+          calcPrice();
+
+          // Обработка онлайн оплаты
+          if (result.payment && result.payment_url) {
+            showMessage('Переходим к оплате...', 'success');
+            setTimeout(() => {
+              window.open(result.payment_url, '_blank');
+            }, 1500);
+          }
+
+        } else {
+          showMessage('❌ Ошибка: ' + (result.error || 'Неизвестная ошибка'), 'error');
+        }
+
+      } catch (error) {
+        showMessage('❌ Ошибка сети: ' + error.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
+
+    function showMessage(text, type) {
+      const msg = document.getElementById('msg');
+      msg.textContent = text;
+      msg.className = 'msg ' + type;
+      msg.style.display = 'block';
+
+      setTimeout(() => {
+        msg.style.display = 'none';
+      }, 5000);
+    }
+
+    // Инициализация
+    fillSelectors();
+    calcPrice();
+  </script>
+</body>
+</html>
