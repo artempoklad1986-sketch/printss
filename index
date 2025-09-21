@@ -1562,7 +1562,7 @@ $ogImage = $cfg['seo']['og_image'] ?: ('data:image/svg+xml;base64,' . base64_enc
    <nav class='nav' aria-label='Навигация'>
   <a href='#catalog'>Каталог</a>
   <a href='#calc'>Калькулятор</a>
-  <a href='produkt.php'>🛍️ Товары</a>
+  <a href='products.php'>🛍️ Товары</a>
   <a href='https://принтсс.рф/photoconstructor.php' target='_blank'>Фото онлайн</a>
   <a href='https://printc47.ru/public/banner_calculator.html' target='_blank'>Кальк. баннеров</a>
   <a href='#services'>Услуги</a>
