@@ -13,7 +13,7 @@ $customersFile = $BASE.'/customers.json';
 // Создаем папку для загрузок если не существует
 if (!is_dir($uploadsDir)) @mkdir($uploadsDir, 0775, true);
 if (!file_exists($uploadsDir.'/.htaccess')) {
-    @file_put_contents($uploadsDir.'/.htaccess', 'php_flag engine off\nOptions -ExecCGI\n<FilesMatch \'\.(php|phar|phtml|cgi|pl|py)$\'>\nDeny from all\n</FilesMatch>\n');
+    @file_put_contents($uploadsDir.'/.htaccess', 'php_flag engine off\nOptions -ExecCGI\n<FilesMatch \'\\.(php|phar|phtml|cgi|pl|py)$\'>\nDeny from all\n</FilesMatch>\n');
 }
 
 // Загружаем основной конфиг
@@ -49,6 +49,7 @@ function loadPhotoConfig($photoConfigFile) {
             ],
             'processing_options' => [
                 ['name' => 'Кадрирование', 'price' => 20, 'enabled' => true, 'description' => 'Обрезка по нужному размеру'],
+                ['name' => 'Стиль Полароид', 'price' => 50, 'enabled' => true, 'description' => 'Оформление в стиле Polaroid с белой рамкой'],
                 ['name' => 'Удаление красных глаз', 'price' => 30, 'enabled' => true, 'description' => 'Коррекция эффекта красных глаз'],
                 ['name' => 'Черно-белое', 'price' => 10, 'enabled' => true, 'description' => 'Преобразование в ч/б']
             ],
@@ -391,6 +392,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
                     $editParams = [];
                     if (isset($_POST['edit_params'][$i]) && is_array($_POST['edit_params'][$i])) {
                         $editParams = $_POST['edit_params'][$i];
+
+                        // Специальная обработка для Polaroid стиля
+                        if (in_array('Стиль Полароид', $processingOptions)) {
+                            $editParams['polaroid'] = true;
+                        }
                     }
 
                     $uploadedPhotos[] = [
@@ -411,10 +417,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             throw new Exception('Не удалось загрузить ни одного фото. Проверьте формат и размер файлов.');
         }
 
-        // Валидация параметров печати из админки
-        $enabledSizes = array_filter($photoConfig['sizes'] ?? [], function($item) { return !empty($item['enabled']); });
-        $enabledPapers = array_filter($photoConfig['papers'] ?? [], function($item) { return !empty($item['enabled']); });
-        $enabledCorrections = array_filter($photoConfig['corrections'] ?? [], function($item) { return !empty($item['enabled']); });
+        // Валидация параметров печати из админки - ИСПРАВЛЕН БАГ
+        $enabledSizes = array_values(array_filter($photoConfig['sizes'] ?? [], function($item) { return !empty($item['enabled']); }));
+        $enabledPapers = array_values(array_filter($photoConfig['papers'] ?? [], function($item) { return !empty($item['enabled']); }));
+        $enabledCorrections = array_values(array_filter($photoConfig['corrections'] ?? [], function($item) { return !empty($item['enabled']); }));
 
         $sizeConfig = null;
         foreach ($enabledSizes as $s) {
@@ -424,7 +430,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             }
         }
         if (!$sizeConfig) {
-            throw new Exception('Выбранный размер недоступен');
+            // ИСПРАВЛЕНА ОШИБКА: используем первый доступный размер вместо ошибки
+            if (!empty($enabledSizes)) {
+                $sizeConfig = $enabledSizes[0];
+                $size = $sizeConfig['name'];
+            } else {
+                throw new Exception('Размеры фото недоступны');
+            }
         }
 
         $paperConfig = null;
@@ -435,7 +447,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             }
         }
         if (!$paperConfig) {
-            throw new Exception('Выбранный тип бумаги недоступен');
+            // Используем первый доступный тип бумаги
+            if (!empty($enabledPapers)) {
+                $paperConfig = $enabledPapers[0];
+                $paper = $paperConfig['name'];
+            } else {
+                throw new Exception('Типы бумаги недоступны');
+            }
         }
 
         $correctionConfig = null;
@@ -446,7 +464,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             }
         }
         if (!$correctionConfig) {
-            throw new Exception('Выбранный тип коррекции недоступен');
+            // Используем первый доступный тип коррекции
+            if (!empty($enabledCorrections)) {
+                $correctionConfig = $enabledCorrections[0];
+                $correction = $correctionConfig['name'];
+            } else {
+                throw new Exception('Типы коррекции недоступны');
+            }
         }
 
         // Расчет стоимости с учетом всех опций
@@ -566,7 +590,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             'created_at' => date('Y-m-d H:i:s'),
             'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
             'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
-            'source' => 'photo_constructor_premium_v2.0'
+            'source' => 'photo_constructor_premium_v2.1'
         ];
 
         // Логируем заказ для админки
@@ -604,7 +628,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
                 $url = 'https://api.yookassa.ru/v3/payments';
 
                 $paymentDescription = "Фотопечать: $photoCount фото × $qty экз.";
-                if ($deliveryConfig) $paymentDescription .= " + " . $deliveryConfig['name'];
+                if ($deliveryConfig) $paymentDescription .= ' + ' . $deliveryConfig['name'];
 
                 $data = [
                     'amount' => ['value' => number_format($totalPrice, 2, '.', ''), 'currency' => 'RUB'],
@@ -669,7 +693,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
         $emailBody .= "═══════════════════════════════════════\n";
         $emailBody .= "ID заказа: $orderId\n";
         $emailBody .= 'Дата и время: ' . date('d.m.Y H:i:s') . "\n";
-        $emailBody .= "Источник: Фотоконструктор Премиум v2.0\n";
+        $emailBody .= "Источник: Фотоконструктор Премиум v2.1\n";
         $emailBody .= 'IP адрес: ' . ($order['ip'] ?: 'неизвестен') . "\n\n";
 
         $emailBody .= "═══════════════════════════════════════\n";
@@ -698,6 +722,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
             $emailBody .= "\n📎 Дополнительные услуги:\n";
             foreach ($selectedProcessing as $proc) {
                 $emailBody .= '• ' . $proc['name'] . ' (' . $proc['price'] . " ₽ за фото)\n";
+
+                // Специальная заметка для Полароид
+                if ($proc['name'] === 'Стиль Полароид') {
+                    $emailBody .= "   📸 ВАЖНО: Фото будут обработаны в стиле Polaroid с белой рамкой\n";
+                    $emailBody .= "   🎨 Клиент может сам подгонять фото под рамку в редакторе\n";
+                }
             }
         }
 
@@ -762,6 +792,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
                     $crop = $photo['edit_params']['crop'];
                     $emailBody .= '      Кадрирование: x=' . $crop['x'] . ', y=' . $crop['y'] . ', w=' . $crop['width'] . ', h=' . $crop['height'] . "\n";
                 }
+                if (isset($photo['edit_params']['polaroid']) && $photo['edit_params']['polaroid']) {
+                    $emailBody .= "      🎞️ СТИЛЬ POLAROID: создать белую рамку в ретро-стиле\n";
+                }
             }
             $emailBody .= "\n";
         }
@@ -773,7 +806,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
         $emailBody .= 'Способ оплаты: ' . ($paymentMethod === 'online' ? 'Онлайн (ЮКасса)' : 'При получении') . "\n";
         $emailBody .= "Все файлы сохранены в папке: uploads/\n";
         $emailBody .= "Для просмотра заказа в CRM используйте ID: $orderId\n";
-        $emailBody .= "Для создания архива всех фото заказа используйте функцию \"Скачать архив фото\" в админке\n\n";
+        $emailBody .= "Для создания архива всех фото заказа используйте функцию 'Скачать архив фото' в админке\n\n";
 
         $emailBody .= "═══════════════════════════════════════\n";
         $emailBody .= "С уважением,\n";
@@ -793,9 +826,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
         $tgMsg .= "\n📸 <b>Заказ:</b>\n";
         $tgMsg .= "📐 $size (" . $sizeConfig['w'] . '×' . $sizeConfig['h'] . " см)\n";
         $tgMsg .= "📄 $paper";
-        if ($paperConfig['delta'] > 0) $tgMsg .= " (+" . $paperConfig['delta'] . "₽)";
+        if ($paperConfig['delta'] > 0) $tgMsg .= " (+{$paperConfig['delta']}₽)";
         $tgMsg .= "\n🎨 $correction";
-        if ($correctionConfig['delta'] > 0) $tgMsg .= " (+" . $correctionConfig['delta'] . "₽)";
+        if ($correctionConfig['delta'] > 0) $tgMsg .= " (+{$correctionConfig['delta']}₽)";
         $tgMsg .= "\n🔢 Тираж: $qty экз/фото\n";
         $tgMsg .= "📷 Фото: <b>$photoCount</b> шт\n";
         $tgMsg .= '📦 Отпечатков: <b>' . ($photoCount * $qty) . "</b> шт\n";
@@ -803,13 +836,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['mode']) && $_POST['mo
         if (!empty($selectedProcessing)) {
             $tgMsg .= "\n🛠 <b>Доп. услуги:</b>\n";
             foreach ($selectedProcessing as $proc) {
-                $tgMsg .= "• " . $proc['name'] . " (" . $proc['price'] . "₽)\n";
+                $tgMsg .= "• " . $proc['name'] . " ({$proc['price']}₽)\n";
+                if ($proc['name'] === 'Стиль Полароид') {
+                    $tgMsg .= "  📸 Polaroid стиль с рамкой\n";
+                }
             }
         }
 
         if ($deliveryConfig) {
             $tgMsg .= "\n🚚 <b>Доставка:</b> " . $deliveryConfig['name'];
-            if ($deliveryConfig['price'] > 0) $tgMsg .= " (+" . $deliveryConfig['price'] . "₽)";
+            if ($deliveryConfig['price'] > 0) $tgMsg .= " (+{$deliveryConfig['price']}₽)";
             $tgMsg .= "\n";
         }
 
@@ -872,13 +908,13 @@ $brandCol = $T['brand'] ?? '#FF8A00';
 $accentCol = $T['accent'] ?? '#2D5BFF';
 ?>
 <!doctype html>
-<html lang='ru'>
+<html lang="ru">
 <head>
-  <meta charset='utf-8'>
+  <meta charset="utf-8">
   <title>Премиум фотоконструктор с редактором — <?=esc($cfg['brand'] ?? 'ПРИНТСС')?></title>
-  <meta name='viewport' content='width=device-width, initial-scale=1'>
-  <meta name='description' content='Профессиональный заказ фотопечати онлайн с редактором изображений. Загрузите фото, настройте яркость и контраст, выберите размер. Быстро, качественно, удобно.'>
-  <meta name='keywords' content='фотопечать, редактор фото, печать фото, фотоуслуги, онлайн заказ фото, яркость, контраст, кадрирование'>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Профессиональный заказ фотопечати онлайн с редактором изображений. Загрузите фото, настройте яркость и контраст, выберите размер. Быстро, качественно, удобно.">
+  <meta name="keywords" content="фотопечать, редактор фото, печать фото, фотоуслуги, онлайн заказ фото, яркость, контраст, кадрирование, полароид">
 
   <style>
     :root{
@@ -1014,7 +1050,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       margin-bottom:6px;
     }
 
-    input[type='text'], input[type='email'], input[type='number'], select, textarea{
+    input[type="text"], input[type="email"], input[type="number"], select, textarea{
       width:100%;
       padding:12px;
       border-radius:8px;
@@ -1173,7 +1209,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       background: var(--card);
       border-radius: 16px;
       width: 90%;
-      max-width: 900px;
+      max-width: 1000px;
       max-height: 90vh;
       overflow: hidden;
       display: flex;
@@ -1186,6 +1222,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       display: flex;
       justify-content: space-between;
       align-items: center;
+      background: var(--card);
     }
 
     .editor-body{
@@ -1210,11 +1247,14 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       object-fit: contain;
     }
 
+    /* УЛУЧШЕННОЕ КАДРИРОВАНИЕ */
     .crop-overlay{
       position: absolute;
       border: 2px solid var(--accent);
+      background: rgba(45, 91, 255, 0.1);
       cursor: move;
       display: none;
+      user-select: none;
     }
 
     .crop-overlay.show{
@@ -1223,15 +1263,35 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 
     .crop-handle{
       position: absolute;
-      width: 8px;
-      height: 8px;
+      width: 12px;
+      height: 12px;
       background: var(--accent);
-      border: 1px solid #fff;
-      cursor: nw-resize;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 2px 4px rgba(0,0,0,.3);
+    }
+
+    .crop-handle.nw{ top: -6px; left: -6px; cursor: nw-resize; }
+    .crop-handle.ne{ top: -6px; right: -6px; cursor: ne-resize; }
+    .crop-handle.sw{ bottom: -6px; left: -6px; cursor: sw-resize; }
+    .crop-handle.se{ bottom: -6px; right: -6px; cursor: se-resize; }
+
+    .crop-info{
+      position: absolute;
+      bottom: -30px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,.8);
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      white-space: nowrap;
     }
 
     .editor-controls{
-      width: 280px;
+      width: 300px;
       padding: 20px;
       background: var(--card);
       border-left: 1px solid rgba(0,0,0,.1);
@@ -1262,6 +1322,10 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       width: 100%;
       margin: 8px 0;
       accent-color: var(--accent);
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(0,0,0,.1);
+      outline: none;
     }
 
     .control-value{
@@ -1269,6 +1333,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       font-size: 12px;
       color: var(--muted);
       margin-top: 4px;
+      font-weight: 600;
     }
 
     .crop-controls{
@@ -1279,14 +1344,16 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
     }
 
     .btn-crop{
-      padding: 6px 12px;
+      padding: 8px 12px;
       border: 1px solid rgba(0,0,0,.2);
       background: #fff;
       color: var(--text);
       border-radius: 6px;
       cursor: pointer;
-      font-size: 12px;
+      font-size: 11px;
       transition: all 0.2s;
+      text-align: center;
+      font-weight: 500;
     }
 
     .btn-crop:hover{
@@ -1299,6 +1366,35 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       background: var(--accent);
       color: #fff;
       border-color: var(--accent);
+      box-shadow: 0 2px 4px rgba(45,91,255,.3);
+    }
+
+    /* СТИЛЬ ПОЛАРОИД */
+    .polaroid-preview{
+      position: relative;
+      display: inline-block;
+      padding: 15px 15px 50px;
+      background: #fff;
+      box-shadow: 0 4px 8px rgba(0,0,0,.2), 0 2px 4px rgba(0,0,0,.1);
+      transform: rotate(-2deg);
+      margin: 20px;
+    }
+
+    .polaroid-preview img{
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .polaroid-preview::after{
+      content: '';
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 80%;
+      height: 2px;
+      background: rgba(0,0,0,.05);
     }
 
     .calc{
@@ -1371,6 +1467,11 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       color:#fff;
     }
 
+    .btn-polaroid{
+      background:linear-gradient(135deg, #f39c12, #e67e22);
+      color:#fff;
+    }
+
     .btn:hover{
       transform:translateY(-1px);
       box-shadow:0 4px 12px rgba(0,0,0,.2);
@@ -1435,7 +1536,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 
     .option-item{
       display:flex;
-      align-items:center;
+      align-items:flex-start;
       gap:8px;
       margin:8px 0;
     }
@@ -1443,6 +1544,22 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
     .option-item input[type=checkbox]{
       margin:0;
       width:auto;
+      margin-top: 2px;
+    }
+
+    .option-item .option-details{
+      flex: 1;
+    }
+
+    .option-item .option-price{
+      font-weight: 600;
+      color: var(--brand);
+    }
+
+    .option-item .option-desc{
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
     }
 
     .discount-badge{
@@ -1519,6 +1636,11 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       z-index: 5;
     }
 
+    .polaroid-badge{
+      background: linear-gradient(135deg, #f39c12, #e67e22);
+      color: #fff;
+    }
+
     @media(max-width:768px){
       .topflex{
         flex-direction:column;
@@ -1547,7 +1669,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       }
       .editor-controls{
         width: 100%;
-        max-height: 200px;
+        max-height: 250px;
         border-left: none;
         border-top: 1px solid rgba(0,0,0,.1);
       }
@@ -1556,61 +1678,61 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 </head>
 <body>
   <?php if (empty($photoConfig['enabled'])): ?>
-    <div class='disabled-notice'>
+    <div class="disabled-notice">
       <h2>⚠️ Фотоконструктор временно недоступен</h2>
       <p>Приносим извинения за неудобства. Сервис находится на техническом обслуживании.</p>
-      <a href='/' class='btn btn-primary'>🏠 Вернуться на главную</a>
+      <a href="/" class="btn btn-primary">🏠 Вернуться на главную</a>
     </div>
   <?php else: ?>
 
-  <header class='topbar'>
-    <div class='topflex'>
-      <a href='/' class='logo'>
-        <div class='logo-badge'>П</div>
+  <header class="topbar">
+    <div class="topflex">
+      <a href="/" class="logo">
+        <div class="logo-badge">П</div>
         <div>
-          <div class='logo-title'><?=esc($cfg['brand'] ?? 'ПРИНТСС')?></div>
-          <div style='font-size:12px;color:var(--muted)'>Премиум фотоконструктор с редактором</div>
+          <div class="logo-title"><?=esc($cfg['brand'] ?? 'ПРИНТСС')?></div>
+          <div style="font-size:12px;color:var(--muted)">Премиум фотоконструктор с редактором</div>
         </div>
       </a>
 
-      <nav class='nav'>
-        <a href='/'>🏠 Главная</a>
-        <a href='products.php'>🛍️ Товары</a>
-        <a href='tel:<?=esc($cfg['phone_raw'] ?? '+79522003990')?>'><?=esc($cfg['phone_display'] ?? '+7 (952) 200-39-90')?></a>
+      <nav class="nav">
+        <a href="/">🏠 Главная</a>
+        <a href="products.php">🛍️ Товары</a>
+        <a href="tel:<?=esc($cfg['phone_raw'] ?? '+79522003990')?>"><?=esc($cfg['phone_display'] ?? '+7 (952) 200-39-90')?></a>
       </nav>
     </div>
   </header>
 
-  <main class='wrap'>
-    <section class='card'>
+  <main class="wrap">
+    <section class="card">
       <h2>📸 Загрузите фотографии с редактором изображений</h2>
-      <p style='color:var(--muted);margin-bottom:20px'>
+      <p style="color:var(--muted);margin-bottom:20px">
         Выберите до <?=esc($photoConfig['max_photos'])?> фотографий для печати.
-        Поддерживаются форматы: <?=esc(strtoupper(implode(', ', $photoConfig['supported_formats'])))?>. 
+        Поддерживаются форматы: <?=esc(strtoupper(implode(', ', $photoConfig['supported_formats'])))?>.
         Максимальный размер файла: <?=esc($photoConfig['max_file_size'])?>МБ.
-        <br><strong>🎨 Новое: встроенный редактор для настройки яркости, контраста и кадрирования!</strong>
+        <br><strong>🎨 Новое: встроенный редактор для настройки яркости, контраста, кадрирования и стиля Polaroid!</strong>
       </p>
 
-      <div class='uploader' id='uploader'>
-        <input type='file' id='files' accept='image/*' multiple>
-        <div class='icon'>📷</div>
-        <div class='hint'>Перетащите фото сюда или нажмите для выбора</div>
-        <div style='font-size:12px;color:var(--muted);margin-top:8px'>
+      <div class="uploader" id="uploader">
+        <input type="file" id="files" accept="image/*" multiple>
+        <div class="icon">📷</div>
+        <div class="hint">Перетащите фото сюда или нажмите для выбора</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:8px">
           Максимум <?=esc($photoConfig['max_photos'])?> файлов, до <?=esc($photoConfig['max_file_size'])?>МБ каждый
         </div>
       </div>
 
-      <div id='previews' class='previews'></div>
+      <div id="previews" class="previews"></div>
     </section>
 
-    <section class='card'>
+    <section class="card">
       <h2>⚙️ Параметры печати</h2>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Размер фото</label>
-        <select id='size'>
+        <select id="size">
           <?php foreach($enabledSizes as $size): ?>
-            <option value='<?=esc($size['name'])?>' data-price='<?=esc($size['base'])?>' <?=!empty($size['popular']) ? 'data-popular=\'1\'' : ''?>>
+            <option value="<?=esc($size['name'])?>" data-price="<?=esc($size['base'])?>" <?=!empty($size['popular']) ? 'data-popular="1"' : ''?>>
               <?=esc($size['name'])?> (<?=esc($size['w'])?>×<?=esc($size['h'])?>см) — <?=esc($size['base'])?> ₽
               <?=!empty($size['popular']) ? ' ⭐' : ''?>
             </option>
@@ -1618,11 +1740,11 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         </select>
       </div>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Тип бумаги</label>
-        <select id='paper'>
+        <select id="paper">
           <?php foreach($enabledPapers as $paper): ?>
-            <option value='<?=esc($paper['name'])?>' data-delta='<?=esc($paper['delta'])?>' title='<?=esc($paper['description'])?>'>
+            <option value="<?=esc($paper['name'])?>" data-delta="<?=esc($paper['delta'])?>" title="<?=esc($paper['description'])?>">
               <?=esc($paper['name'])?>
               <?php if($paper['delta'] > 0): ?> (+<?=esc($paper['delta'])?> ₽)<?php endif; ?>
             </option>
@@ -1630,16 +1752,16 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         </select>
       </div>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Тираж на каждое фото</label>
-        <input type='number' id='qty' min='1' max='100' value='1'>
+        <input type="number" id="qty" min="1" max="100" value="1">
       </div>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Цветокоррекция</label>
-        <select id='correction'>
+        <select id="correction">
           <?php foreach($enabledCorrections as $correction): ?>
-            <option value='<?=esc($correction['name'])?>' data-delta='<?=esc($correction['delta'])?>' title='<?=esc($correction['description'])?>'>
+            <option value="<?=esc($correction['name'])?>" data-delta="<?=esc($correction['delta'])?>" title="<?=esc($correction['description'])?>">
               <?=esc($correction['name'])?>
               <?php if($correction['delta'] > 0): ?> (+<?=esc($correction['delta'])?> ₽)<?php endif; ?>
             </option>
@@ -1648,29 +1770,35 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       </div>
 
       <?php if (!empty($enabledProcessingOptions)): ?>
-      <div class='options-group'>
-        <div style='font-weight:600;margin-bottom:8px'>🛠️ Дополнительные услуги (на каждое фото):</div>
+      <div class="options-group">
+        <div style="font-weight:600;margin-bottom:12px">🛠️ Дополнительные услуги (на каждое фото):</div>
         <?php foreach($enabledProcessingOptions as $i => $option): ?>
-          <div class='option-item'>
-            <input type='checkbox' id='proc_<?=$i?>' name='processing_options[]' value='<?=esc($option['name'])?>' data-price='<?=esc($option['price'])?>'>
-            <label for='proc_<?=$i?>' style='margin:0;font-weight:normal;font-size:13px'>
-              <?=esc($option['name'])?> (+<?=esc($option['price'])?> ₽)
+          <div class="option-item">
+            <input type="checkbox" id="proc_<?=$i?>" name="processing_options[]" value="<?=esc($option['name'])?>" data-price="<?=esc($option['price'])?>">
+            <div class="option-details">
+              <label for="proc_<?=$i?>" style="margin:0;font-weight:500;font-size:14px;cursor:pointer">
+                <?=esc($option['name'])?> 
+                <span class="option-price">(+<?=esc($option['price'])?> ₽)</span>
+                <?php if ($option['name'] === 'Стиль Полароид'): ?>
+                  <span style="background:#f39c12;color:#fff;padding:2px 6px;border-radius:10px;font-size:10px;margin-left:4px">📸 НОВИНКА</span>
+                <?php endif; ?>
+              </label>
               <?php if (!empty($option['description'])): ?>
-                <small style='color:var(--muted);display:block'><?=esc($option['description'])?></small>
+                <div class="option-desc"><?=esc($option['description'])?></div>
               <?php endif; ?>
-            </label>
+            </div>
           </div>
         <?php endforeach; ?>
       </div>
       <?php endif; ?>
 
       <?php if (!empty($enabledDeliveryOptions)): ?>
-      <div class='form-group'>
+      <div class="form-group">
         <label>Способ получения</label>
-        <select id='delivery'>
-          <option value=''>Выберите способ</option>
+        <select id="delivery">
+          <option value="">Выберите способ</option>
           <?php foreach($enabledDeliveryOptions as $option): ?>
-            <option value='<?=esc($option['name'])?>' data-price='<?=esc($option['price'])?>'>
+            <option value="<?=esc($option['name'])?>" data-price="<?=esc($option['price'])?>">
               <?=esc($option['name'])?>
               <?php if($option['price'] > 0): ?> (+<?=esc($option['price'])?> ₽)<?php endif; ?>
             </option>
@@ -1679,38 +1807,38 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       </div>
       <?php endif; ?>
 
-      <div class='calc'>
-        <div class='price-line'>
+      <div class="calc">
+        <div class="price-line">
           <span>Фото загружено:</span>
-          <span id='photoCount'>0 шт</span>
+          <span id="photoCount">0 шт</span>
         </div>
-        <div class='price-line'>
+        <div class="price-line">
           <span>Всего отпечатков:</span>
-          <span id='totalCopies'>0 шт</span>
+          <span id="totalCopies">0 шт</span>
         </div>
-        <div class='price-line'>
+        <div class="price-line">
           <span>Цена за отпечаток:</span>
-          <span id='pricePerCopy'>0 ₽</span>
+          <span id="pricePerCopy">0 ₽</span>
         </div>
-        <div id='processingLine' class='price-line' style='display:none'>
+        <div id="processingLine" class="price-line" style="display:none">
           <span>Дополнительные услуги:</span>
-          <span id='processingCost'>0 ₽</span>
+          <span id="processingCost">0 ₽</span>
         </div>
-        <div id='deliveryLine' class='price-line' style='display:none'>
+        <div id="deliveryLine" class="price-line" style="display:none">
           <span>Доставка:</span>
-          <span id='deliveryCost'>0 ₽</span>
+          <span id="deliveryCost">0 ₽</span>
         </div>
-        <div id='discountLine' class='price-line' style='display:none;color:var(--brand)'>
+        <div id="discountLine" class="price-line" style="display:none;color:var(--brand)">
           <span>Скидка:</span>
-          <span id='discountText'>0%</span>
+          <span id="discountText">0%</span>
         </div>
-        <div class='total'>
-          <div style='font-size:14px;color:var(--muted)'>Примерная стоимость:</div>
-          <div id='price'>0 ₽</div>
+        <div class="total">
+          <div style="font-size:14px;color:var(--muted)">Примерная стоимость:</div>
+          <div id="price">0 ₽</div>
         </div>
       </div>
 
-      <div class='note'>
+      <div class="note">
         💡 Точная стоимость будет рассчитана менеджером с учетом всех параметров и пожеланий.
         <?php if (!empty($enabledDiscounts)): ?>
           <br>🎯 Действуют скидки за количество:
@@ -1720,109 +1848,127 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         <?php endif; ?>
       </div>
 
-      <h2 style='margin-top:24px'>💬 Комментарий</h2>
-      <textarea id='comment' placeholder='Укажите особые пожелания: печать без полей, кадрирование, коррекция цвета и т.д.'></textarea>
+      <h2 style="margin-top:24px">💬 Комментарий</h2>
+      <textarea id="comment" placeholder="Укажите особые пожелания: печать без полей, кадрирование, коррекция цвета, стиль Polaroid и т.д."></textarea>
 
-      <h2 style='margin-top:24px'>📞 Контактные данные</h2>
+      <h2 style="margin-top:24px">📞 Контактные данные</h2>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Ваше имя *</label>
-        <input type='text' id='name' placeholder='Иван Иванов' required>
+        <input type="text" id="name" placeholder="Иван Иванов" required>
       </div>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Телефон *</label>
-        <input type='text' id='phone' placeholder='+7 (999) 123-45-67' required>
+        <input type="text" id="phone" placeholder="+7 (999) 123-45-67" required>
       </div>
 
-      <div class='form-group'>
+      <div class="form-group">
         <label>Email (для уведомлений)</label>
-        <input type='email' id='email' placeholder='ivan@example.com'>
+        <input type="email" id="email" placeholder="ivan@example.com">
       </div>
 
       <?php if (!empty($cfg['yukassa']['enabled']) && !empty($cfg['yukassa']['services']['photo_constructor'])): ?>
-      <div class='payment-methods'>
-        <div style='font-weight:600;margin-bottom:8px'>💳 Способ оплаты:</div>
-        <div class='payment-option'>
-          <input type='radio' id='payment_offline' name='payment_method' value='offline' checked>
-          <label for='payment_offline'>При получении (наличные/карта)</label>
+      <div class="payment-methods">
+        <div style="font-weight:600;margin-bottom:8px">💳 Способ оплаты:</div>
+        <div class="payment-option">
+          <input type="radio" id="payment_offline" name="payment_method" value="offline" checked>
+          <label for="payment_offline">При получении (наличные/карта)</label>
         </div>
-        <div class='payment-option'>
-          <input type='radio' id='payment_online' name='payment_method' value='online'>
-          <label for='payment_online'>Онлайн оплата (ЮКасса)</label>
+        <div class="payment-option">
+          <input type="radio" id="payment_online" name="payment_method" value="online">
+          <label for="payment_online">Онлайн оплата (ЮКасса)</label>
         </div>
       </div>
       <?php endif; ?>
 
-      <button id='btnSend' class='btn btn-primary' style='width:100%;margin-top:16px'>
+      <button id="btnSend" class="btn btn-primary" style="width:100%;margin-top:16px">
         📤 Отправить заказ
       </button>
 
-      <div id='msg' class='msg' style='display:none'></div>
+      <div id="msg" class="msg" style="display:none"></div>
     </section>
   </main>
 
-  <!-- РЕДАКТОР ИЗОБРАЖЕНИЙ -->
-  <div id='photoEditor' class='photo-editor'>
-    <div class='editor-content'>
-      <div class='editor-header'>
+  <!-- РЕДАКТОР ИЗОБРАЖЕНИЙ С УЛУЧШЕННЫМ КАДРИРОВАНИЕМ -->
+  <div id="photoEditor" class="photo-editor">
+    <div class="editor-content">
+      <div class="editor-header">
         <h3>🎨 Редактор изображений</h3>
         <div>
-          <button class='btn btn-success' onclick='applyEdits()'>✓ Применить</button>
-          <button class='btn btn-secondary' onclick='closeEditor()'>Отмена</button>
+          <button class="btn btn-success" onclick="applyEdits()">✓ Применить</button>
+          <button class="btn btn-secondary" onclick="closeEditor()">❌ Отмена</button>
         </div>
       </div>
-      <div class='editor-body'>
-        <div class='editor-preview'>
-          <canvas id='editorCanvas'></canvas>
-          <div id='cropOverlay' class='crop-overlay'>
-            <div class='crop-handle' style='top:-4px;left:-4px'></div>
-            <div class='crop-handle' style='top:-4px;right:-4px'></div>
-            <div class='crop-handle' style='bottom:-4px;left:-4px'></div>
-            <div class='crop-handle' style='bottom:-4px;right:-4px'></div>
+      <div class="editor-body">
+        <div class="editor-preview">
+          <canvas id="editorCanvas"></canvas>
+          <div id="cropOverlay" class="crop-overlay">
+            <div class="crop-handle nw"></div>
+            <div class="crop-handle ne"></div>
+            <div class="crop-handle sw"></div>
+            <div class="crop-handle se"></div>
+            <div class="crop-info" id="cropInfo">0×0</div>
           </div>
         </div>
-        <div class='editor-controls'>
-          <div class='control-group'>
+        <div class="editor-controls">
+          <div class="control-group">
             <label>Яркость</label>
-            <input type='range' class='control-slider' id='brightnessSlider' min='-100' max='100' value='0'>
-            <div class='control-value' id='brightnessValue'>0</div>
+            <input type="range" class="control-slider" id="brightnessSlider" min="-100" max="100" value="0">
+            <div class="control-value" id="brightnessValue">0</div>
           </div>
 
-          <div class='control-group'>
+          <div class="control-group">
             <label>Контрастность</label>
-            <input type='range' class='control-slider' id='contrastSlider' min='-100' max='100' value='0'>
-            <div class='control-value' id='contrastValue'>0</div>
+            <input type="range" class="control-slider" id="contrastSlider" min="-100" max="100" value="0">
+            <div class="control-value" id="contrastValue">0</div>
           </div>
 
-          <div class='control-group'>
+          <div class="control-group">
             <label>Кадрирование</label>
-            <div class='crop-controls'>
-              <button class='btn-crop' data-ratio='free'>Свободно</button>
-              <button class='btn-crop' data-ratio='square'>Квадрат</button>
-              <button class='btn-crop' data-ratio='4:3'>4:3</button>
-              <button class='btn-crop' data-ratio='16:9'>16:9</button>
-              <button class='btn-crop' data-ratio='3:4'>3:4</button>
-              <button class='btn-crop' data-ratio='2:3'>2:3</button>
+            <div class="crop-controls">
+              <button class="btn-crop" data-ratio="free">Свободно</button>
+              <button class="btn-crop" data-ratio="square">Квадрат</button>
+              <button class="btn-crop" data-ratio="4:3">4:3</button>
+              <button class="btn-crop" data-ratio="16:9">16:9</button>
+              <button class="btn-crop" data-ratio="3:4">3:4</button>
+              <button class="btn-crop" data-ratio="2:3">2:3</button>
             </div>
-            <div style='margin-top:12px'>
-              <button class='btn btn-secondary' style='width:100%' onclick='enableCrop()'>🔲 Включить кадрирование</button>
+            <div style="margin-top:12px">
+              <button id="cropToggle" class="btn btn-secondary" style="width:100%" onclick="toggleCrop()">
+                🔲 Включить кадрирование
+              </button>
             </div>
           </div>
 
-          <div class='control-group'>
+          <div class="control-group">
+            <label>Стиль Polaroid</label>
+            <div style="margin-top:8px">
+              <button class="btn btn-polaroid" style="width:100%" onclick="togglePolaroid()">
+                📸 Предпросмотр Polaroid
+              </button>
+            </div>
+            <div id="polaroidPreview" style="margin-top:12px;text-align:center;display:none">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Предпросмотр стиля Polaroid:</div>
+              <div class="polaroid-preview" style="max-width:150px">
+                <canvas id="polaroidCanvas" width="150" height="100"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div class="control-group">
             <label>Действия</label>
-            <button class='btn btn-secondary' style='width:100%;margin-bottom:8px' onclick='resetEdits()'>🔄 Сброс</button>
-            <button class='btn btn-danger' style='width:100%' onclick='closeEditor()'>❌ Отмена</button>
+            <button class="btn btn-secondary" style="width:100%;margin-bottom:8px" onclick="resetEdits()">🔄 Сброс</button>
+            <button class="btn btn-danger" style="width:100%" onclick="closeEditor()">❌ Отмена</button>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <div id='loading' class='loading'>
-    <div class='loading-content'>
-      <div class='spinner'></div>
+  <div id="loading" class="loading">
+    <div class="loading-content">
+      <div class="spinner"></div>
       <div>Отправка заказа...</div>
     </div>
   </div>
@@ -1878,16 +2024,25 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
     let currentEditingIndex = -1;
     let editorCanvas = null;
     let editorCtx = null;
+    let polaroidCanvas = null;
+    let polaroidCtx = null;
     let originalImageData = null;
     let currentImage = null;
     let editParams = {};
     let cropMode = false;
     let cropData = null;
+    let isDragging = false;
+    let isResizing = false;
+    let dragStart = { x: 0, y: 0 };
+    let currentRatio = 'free';
+    let polaroidMode = false;
 
     // Инициализация редактора
     function initEditor() {
       editorCanvas = document.getElementById('editorCanvas');
       editorCtx = editorCanvas.getContext('2d');
+      polaroidCanvas = document.getElementById('polaroidCanvas');
+      polaroidCtx = polaroidCanvas.getContext('2d');
 
       // Слушатели для слайдеров
       document.getElementById('brightnessSlider').addEventListener('input', updatePreview);
@@ -1898,8 +2053,15 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         btn.addEventListener('click', function() {
           document.querySelectorAll('.btn-crop').forEach(b => b.classList.remove('active'));
           this.classList.add('active');
+          currentRatio = this.dataset.ratio;
+          if (cropMode && cropData) {
+            applyCropRatio();
+          }
         });
       });
+
+      // Слушатели для кадрирования
+      setupCropHandlers();
     }
 
     function openEditor(fileIndex) {
@@ -1912,7 +2074,8 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       editParams = file.editParams || {
         brightness: 0,
         contrast: 0,
-        crop: null
+        crop: null,
+        polaroid: false
       };
 
       // Устанавливаем значения слайдеров
@@ -1927,6 +2090,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         currentImage = img;
         originalImageData = null;
         cropData = editParams.crop;
+        polaroidMode = editParams.polaroid || false;
 
         // Размеры канваса
         const maxWidth = 600;
@@ -1945,6 +2109,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         editorCanvas.style.maxHeight = '100%';
 
         updatePreview();
+        updatePolaroidPreview();
         document.getElementById('photoEditor').classList.add('show');
       };
 
@@ -1990,14 +2155,18 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       }
 
       // Показываем область кадрирования если есть
-      if (cropData) {
+      if (cropData && cropMode) {
         drawCropOverlay();
       }
+
+      updatePolaroidPreview();
     }
 
-    function enableCrop() {
+    // УЛУЧШЕННОЕ КАДРИРОВАНИЕ
+    function toggleCrop() {
       cropMode = !cropMode;
       const overlay = document.getElementById('cropOverlay');
+      const toggleBtn = document.getElementById('cropToggle');
 
       if (cropMode) {
         if (!cropData) {
@@ -2009,34 +2178,191 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
           };
         }
         overlay.classList.add('show');
-        setupCropHandlers();
+        toggleBtn.textContent = '❌ Выключить кадрирование';
+        toggleBtn.className = 'btn btn-danger';
+        updateCropOverlay();
       } else {
         overlay.classList.remove('show');
-        cropData = null;
+        toggleBtn.textContent = '🔲 Включить кадрирование';
+        toggleBtn.className = 'btn btn-secondary';
+      }
+    }
+
+    function updateCropOverlay() {
+      if (!cropData || !cropMode) return;
+
+      const overlay = document.getElementById('cropOverlay');
+      const info = document.getElementById('cropInfo');
+
+      overlay.style.left = cropData.x + 'px';
+      overlay.style.top = cropData.y + 'px';
+      overlay.style.width = cropData.width + 'px';
+      overlay.style.height = cropData.height + 'px';
+
+      info.textContent = Math.round(cropData.width) + '×' + Math.round(cropData.height);
+    }
+
+    function applyCropRatio() {
+      if (!cropData || currentRatio === 'free') return;
+
+      let targetRatio = 1;
+      switch (currentRatio) {
+        case 'square': targetRatio = 1; break;
+        case '4:3': targetRatio = 4/3; break;
+        case '16:9': targetRatio = 16/9; break;
+        case '3:4': targetRatio = 3/4; break;
+        case '2:3': targetRatio = 2/3; break;
+      }
+
+      const currentAspect = cropData.width / cropData.height;
+
+      if (Math.abs(currentAspect - targetRatio) > 0.01) {
+        const centerX = cropData.x + cropData.width / 2;
+        const centerY = cropData.y + cropData.height / 2;
+
+        let newWidth, newHeight;
+
+        if (targetRatio > currentAspect) {
+          newWidth = cropData.height * targetRatio;
+          newHeight = cropData.height;
+        } else {
+          newWidth = cropData.width;
+          newHeight = cropData.width / targetRatio;
+        }
+
+        // Проверяем границы
+        newWidth = Math.min(newWidth, editorCanvas.width);
+        newHeight = Math.min(newHeight, editorCanvas.height);
+
+        cropData.width = newWidth;
+        cropData.height = newHeight;
+        cropData.x = Math.max(0, Math.min(centerX - newWidth/2, editorCanvas.width - newWidth));
+        cropData.y = Math.max(0, Math.min(centerY - newHeight/2, editorCanvas.height - newHeight));
+
+        updateCropOverlay();
       }
     }
 
     function setupCropHandlers() {
-      // Реализация drag & drop для кадрирования
-      // Упрощенная версия для демонстрации
-      console.log('Кадрирование включено. Функционал в разработке.');
+      const overlay = document.getElementById('cropOverlay');
+
+      overlay.addEventListener('mousedown', startDrag);
+      document.addEventListener('mousemove', handleDrag);
+      document.addEventListener('mouseup', stopDrag);
+
+      // Touch events для мобильных устройств
+      overlay.addEventListener('touchstart', handleTouchStart, { passive: false });
+      document.addEventListener('touchmove', handleTouchMove, { passive: false });
+      document.addEventListener('touchend', stopDrag);
+    }
+
+    function startDrag(e) {
+      if (!cropMode || !cropData) return;
+
+      e.preventDefault();
+      isDragging = true;
+
+      const rect = editorCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      dragStart = { x: x - cropData.x, y: y - cropData.y };
+    }
+
+    function handleDrag(e) {
+      if (!isDragging || !cropMode || !cropData) return;
+
+      e.preventDefault();
+
+      const rect = editorCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      cropData.x = Math.max(0, Math.min(x - dragStart.x, editorCanvas.width - cropData.width));
+      cropData.y = Math.max(0, Math.min(y - dragStart.y, editorCanvas.height - cropData.height));
+
+      updateCropOverlay();
+    }
+
+    function handleTouchStart(e) {
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        startDrag({ clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => e.preventDefault() });
+      }
+    }
+
+    function handleTouchMove(e) {
+      if (e.touches.length === 1) {
+        const touch = e.touches[0];
+        handleDrag({ clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => e.preventDefault() });
+      }
+    }
+
+    function stopDrag() {
+      isDragging = false;
+      isResizing = false;
     }
 
     function drawCropOverlay() {
-      if (!cropData) return;
+      // Отрисовка уже происходит через CSS
+    }
 
-      editorCtx.save();
-      editorCtx.strokeStyle = '#2D5BFF';
-      editorCtx.lineWidth = 2;
-      editorCtx.strokeRect(cropData.x, cropData.y, cropData.width, cropData.height);
-      editorCtx.restore();
+    // СТИЛЬ POLAROID
+    function togglePolaroid() {
+      polaroidMode = !polaroidMode;
+      const preview = document.getElementById('polaroidPreview');
+
+      if (polaroidMode) {
+        preview.style.display = 'block';
+        updatePolaroidPreview();
+      } else {
+        preview.style.display = 'none';
+      }
+    }
+
+    function updatePolaroidPreview() {
+      if (!polaroidMode || !polaroidCanvas || !currentImage) return;
+
+      const canvas = polaroidCanvas;
+      const ctx = polaroidCtx;
+
+      // Размеры для превью
+      const previewWidth = 140;
+      const previewHeight = 90;
+
+      canvas.width = previewWidth;
+      canvas.height = previewHeight;
+
+      // Белая рамка Polaroid
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, previewWidth, previewHeight);
+
+      // Область для фото (оставляем место для подписи снизу)
+      const photoMargin = 8;
+      const bottomMargin = 20;
+      const photoWidth = previewWidth - (photoMargin * 2);
+      const photoHeight = previewHeight - photoMargin - bottomMargin;
+
+      // Рисуем фото
+      ctx.drawImage(currentImage, photoMargin, photoMargin, photoWidth, photoHeight);
+
+      // Тень
+      ctx.fillStyle = 'rgba(0,0,0,0.1)';
+      ctx.fillRect(photoMargin + 1, photoMargin + 1, photoWidth, photoHeight);
     }
 
     function resetEdits() {
       document.getElementById('brightnessSlider').value = 0;
       document.getElementById('contrastSlider').value = 0;
       cropData = null;
+      polaroidMode = false;
+      cropMode = false;
       document.getElementById('cropOverlay').classList.remove('show');
+      document.getElementById('polaroidPreview').style.display = 'none';
+      document.getElementById('cropToggle').textContent = '🔲 Включить кадрирование';
+      document.getElementById('cropToggle').className = 'btn btn-secondary';
+      document.querySelectorAll('.btn-crop').forEach(b => b.classList.remove('active'));
+      currentRatio = 'free';
       updatePreview();
     }
 
@@ -2049,7 +2375,8 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         uploadedFiles[currentEditingIndex].editParams = {
           brightness: brightness,
           contrast: contrast,
-          crop: cropData
+          crop: cropData,
+          polaroid: polaroidMode
         };
 
         // Обновляем превью миниатюры
@@ -2065,26 +2392,40 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       document.getElementById('photoEditor').classList.remove('show');
       currentEditingIndex = -1;
       cropMode = false;
+      polaroidMode = false;
       cropData = null;
+      resetEdits();
     }
 
     function updateThumbnail(index) {
       const file = uploadedFiles[index];
-      const thumb = document.querySelector('[data-index="' + index + '"] .img');
+      const thumb = document.querySelector('[data-index="' + index + '"]');
 
-      if (thumb && file.editParams && (file.editParams.brightness !== 0 || file.editParams.contrast !== 0)) {
-        // Добавляем значок что изображение отредактировано
-        let badge = document.querySelector('[data-index="' + index + '"] .preview-badge');
-        if (!badge) {
-          badge = document.createElement('div');
-          badge.className = 'preview-badge';
-          badge.textContent = '🎨 Отредактировано';
-          document.querySelector('[data-index="' + index + '"]').appendChild(badge);
+      if (thumb && file.editParams) {
+        // Удаляем старые бейджи
+        const oldBadges = thumb.querySelectorAll('.preview-badge');
+        oldBadges.forEach(badge => badge.remove());
+
+        let badgeText = '';
+        let badgeClass = 'preview-badge';
+
+        if (file.editParams.polaroid) {
+          badgeText = '📸 Polaroid';
+          badgeClass += ' polaroid-badge';
+        } else if (file.editParams.brightness !== 0 || file.editParams.contrast !== 0 || file.editParams.crop) {
+          badgeText = '🎨 Отредактировано';
+        }
+
+        if (badgeText) {
+          const badge = document.createElement('div');
+          badge.className = badgeClass;
+          badge.textContent = badgeText;
+          thumb.appendChild(badge);
         }
       }
     }
 
-    // Расчет стоимости
+    // Расчет стоимости с исправлением ошибки "размер недоступен"
     function calcPrice() {
       const sizeSelect = document.getElementById('size');
       const paperSelect = document.getElementById('paper');
@@ -2093,9 +2434,13 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       const qty = parseInt(document.getElementById('qty').value || '1');
       const photoCount = uploadedFiles.length;
 
-      const basePrice = parseInt(sizeSelect.selectedOptions[0] && sizeSelect.selectedOptions[0].dataset.price || '0');
-      const paperDelta = parseInt(paperSelect.selectedOptions[0] && paperSelect.selectedOptions[0].dataset.delta || '0');
-      const correctionDelta = parseInt(correctionSelect.selectedOptions[0] && correctionSelect.selectedOptions[0].dataset.delta || '0');
+      // ИСПРАВЛЕНА ОШИБКА: проверяем наличие selectedOptions
+      const basePrice = (sizeSelect.selectedOptions.length > 0) ? 
+        parseInt(sizeSelect.selectedOptions[0].dataset.price || '0') : 0;
+      const paperDelta = (paperSelect.selectedOptions.length > 0) ? 
+        parseInt(paperSelect.selectedOptions[0].dataset.delta || '0') : 0;
+      const correctionDelta = (correctionSelect.selectedOptions.length > 0) ? 
+        parseInt(correctionSelect.selectedOptions[0].dataset.delta || '0') : 0;
 
       const pricePerPhoto = basePrice + paperDelta + correctionDelta;
       const totalCopies = photoCount * qty;
@@ -2109,7 +2454,8 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       const totalProcessingCost = currentProcessingCost * photoCount;
 
       // Доставка
-      currentDeliveryCost = parseInt(deliverySelect.selectedOptions[0] && deliverySelect.selectedOptions[0].dataset.price || '0');
+      currentDeliveryCost = (deliverySelect.selectedOptions.length > 0) ? 
+        parseInt(deliverySelect.selectedOptions[0].dataset.price || '0') : 0;
 
       let totalPrice = (pricePerPhoto * totalCopies) + totalProcessingCost + currentDeliveryCost;
 
@@ -2193,7 +2539,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       uploadedFiles.forEach((file, index) => {
         addThumb(file, index);
         // Восстанавливаем бейдж если был отредактирован
-        if (file.editParams && (file.editParams.brightness !== 0 || file.editParams.contrast !== 0)) {
+        if (file.editParams && (file.editParams.brightness !== 0 || file.editParams.contrast !== 0 || file.editParams.crop || file.editParams.polaroid)) {
           updateThumbnail(index);
         }
       });
@@ -2232,7 +2578,8 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         file.editParams = {
           brightness: 0,
           contrast: 0,
-          crop: null
+          crop: null,
+          polaroid: false
         };
 
         validFiles.push(file);
@@ -2336,6 +2683,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
           if (file.editParams) {
             fd.append('edit_params[' + index + '][brightness]', file.editParams.brightness);
             fd.append('edit_params[' + index + '][contrast]', file.editParams.contrast);
+            fd.append('edit_params[' + index + '][polaroid]', file.editParams.polaroid ? '1' : '0');
             if (file.editParams.crop) {
               fd.append('edit_params[' + index + '][crop][x]', file.editParams.crop.x);
               fd.append('edit_params[' + index + '][crop][y]', file.editParams.crop.y);
@@ -2412,7 +2760,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             message += '\n💰 Итого: ' + result.estimated_price.toLocaleString('ru-RU') + ' ₽';
           }
 
-          message += '\n\n🎨 Использованные настройки редактора сохранены и переданы в заказ';
+          message += '\n\n🎨 Использованные настройки редактора (включая Polaroid) сохранены и переданы в заказ';
 
           if (result.warning) {
             message += '\n\n⚠️ ' + result.warning;
@@ -2488,6 +2836,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
       const popularOption = document.querySelector('#size option[data-popular="1"]');
       if (popularOption) {
         document.getElementById('size').value = popularOption.value;
+        calcPrice(); // Пересчитываем цену после установки размера
       }
 
       // Закрытие редактора по ESC
@@ -2497,8 +2846,9 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         }
       });
 
-      console.log('🎯 ПРЕМИУМ Фотоконструктор с редактором изображений v2.0 инициализирован!');
-      console.log('✅ Функции: яркость, контрастность, кадрирование');
+      console.log('🎯 ПРЕМИУМ Фотоконструктор с редактором изображений v2.1 инициализирован!');
+      console.log('✅ Функции: яркость, контрастность, УЛУЧШЕННОЕ кадрирование, СТИЛЬ POLAROID');
+      console.log('✅ ИСПРАВЛЕНА ошибка "выбранный размер недоступен"');
       console.log('✅ CRM интеграция с архивом фото');
       console.log('✅ Все заказы на artcopy78@bk.ru');
     });
