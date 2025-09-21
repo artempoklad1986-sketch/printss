@@ -8,22 +8,124 @@ $BASE = __DIR__;
 $configFile = $BASE.'/config.json';
 $productsFile = $BASE.'/products.json';
 $ordersLog = $BASE.'/orders.txt';
+$reviewsFile = $BASE.'/reviews.json';
 
-// Загружаем конфиг и товары
-$cfg = json_decode(@file_get_contents($configFile), true) ?? [];
-$products = json_decode(@file_get_contents($productsFile), true) ?? [];
+// Создаем файлы конфигурации, если их нет
+if (!file_exists($configFile)) {
+    $defaultConfig = [
+        'brand' => 'Фотоцентр ПРИНТСС',
+        'site' => 'https://printss.ru',
+        'address' => 'г. Сосновый Бор, ул. Красных Фортов, 49',
+        'email_to' => 'artcopy78@bk.ru',
+        'theme' => ['brand' => '#FF8A00', 'accent' => '#2D5BFF'],
+        'telegram' => ['enabled' => false, 'token' => '', 'chat' => ''],
+        'yukassa' => ['enabled' => false, 'shop_id' => '', 'secret_key' => '', 'return_url' => '']
+    ];
+    file_put_contents($configFile, json_encode($defaultConfig, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+if (!file_exists($productsFile)) {
+    $defaultProducts = [
+        [
+            'id' => 1,
+            'name' => 'Фоторамка A4',
+            'description' => 'Качественная фоторамка для фото размером A4',
+            'full_description' => 'Элегантная фоторамка формата A4 из качественного пластика. Идеально подходит для размещения ваших любимых фотографий. Легко устанавливается как в вертикальном, так и в горизонтальном положении. Стеклянная вставка защищает фото от пыли и повреждений.',
+            'price' => 500,
+            'old_price' => 0,
+            'stock' => 10,
+            'category' => 'frames',
+            'enabled' => true,
+            'featured' => true,
+            'image' => '',
+            'gallery' => [],
+            'specifications' => [
+                'Размер' => 'A4 (21×29.7 см)',
+                'Материал' => 'Пластик',
+                'Цвет' => 'Черный, белый',
+                'Стекло' => 'Обычное'
+            ]
+        ],
+        [
+            'id' => 2,
+            'name' => 'Фотоальбом 30 листов',
+            'description' => 'Классический фотоальбом на 30 листов',
+            'full_description' => 'Традиционный фотоальбом с магнитными листами. Вмещает до 60 фотографий формата 10×15 см. Обложка из качественного кожзама, листы с клеевой основой надежно фиксируют фотографии.',
+            'price' => 750,
+            'old_price' => 900,
+            'stock' => 5,
+            'category' => 'albums',
+            'enabled' => true,
+            'featured' => false,
+            'image' => '',
+            'gallery' => [],
+            'specifications' => [
+                'Количество листов' => '30',
+                'Вместимость' => 'До 60 фото 10×15',
+                'Обложка' => 'Кожзам',
+                'Размер' => '23×28 см'
+            ]
+        ]
+    ];
+    file_put_contents($productsFile, json_encode($defaultProducts, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+if (!file_exists($reviewsFile)) {
+    $defaultReviews = [
+        [
+            'id' => 1,
+            'product_id' => 1,
+            'name' => 'Анна К.',
+            'rating' => 5,
+            'comment' => 'Отличная рамка! Качественная, красивая. Фото смотрится очень хорошо.',
+            'date' => '2024-01-15',
+            'approved' => true
+        ],
+        [
+            'id' => 2,
+            'product_id' => 2,
+            'name' => 'Михаил П.',
+            'rating' => 4,
+            'comment' => 'Хороший альбом, качественный. Немного дороговато, но в целом доволен покупкой.',
+            'date' => '2024-01-10',
+            'approved' => true
+        ]
+    ];
+    file_put_contents($reviewsFile, json_encode($defaultReviews, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+// Загружаем конфиг, товары и отзывы
+$cfg = json_decode(file_get_contents($configFile), true) ?? [];
+$products = json_decode(file_get_contents($productsFile), true) ?? [];
+$reviews = json_decode(file_get_contents($reviewsFile), true) ?? [];
 
 /* Хелперы */
 function esc($s){ return htmlspecialchars((string)$s, ENT_QUOTES|ENT_SUBSTITUTE, 'UTF-8'); }
-function sanitize_text($s){ return trim(filter_var($s, FILTER_SANITIZE_FULL_SPECIAL_CHARS)); }
+
+function sanitize_text($s){ 
+    $s = trim($s);
+    $s = filter_var($s, FILTER_SANITIZE_FULL_SPECIAL_CHARS);
+    return $s;
+}
+
+function validate_phone($phone) {
+    $phone = preg_replace('/[^\d+]/', '', $phone);
+    return strlen($phone) >= 10 && strlen($phone) <= 15;
+}
 
 function log_order($path, $data){
-    @file_put_contents($path, '['.date('Y-m-d H:i:s').'] '.json_encode($data, JSON_UNESCAPED_UNICODE).PHP_EOL, FILE_APPEND);
+    $logData = '['.date('Y-m-d H:i:s').'] '.json_encode($data, JSON_UNESCAPED_UNICODE).PHP_EOL;
+    file_put_contents($path, $logData, FILE_APPEND | LOCK_EX);
 }
 
 function send_email_simple($to, $subject, $body) {
-    $headers = "From: noreply@printss.ru\r\nContent-Type: text/plain; charset=UTF-8\r\n";
-    return @mail($to, '=?UTF-8?B?'.base64_encode($subject).'?=', $body, $headers);
+    if (!filter_var($to, FILTER_VALIDATE_EMAIL)) return false;
+
+    $headers = "From: noreply@printss.ru\r\n";
+    $headers .= "Content-Type: text/plain; charset=UTF-8\r\n";
+    $headers .= "X-Mailer: PHP/" . phpversion();
+
+    return mail($to, '=?UTF-8?B?'.base64_encode($subject).'?=', $body, $headers);
 }
 
 function tg_send_message($cfg, $text) {
@@ -40,53 +142,71 @@ function tg_send_message($cfg, $text) {
     ];
 
     $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+    if ($ch === false) return false;
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query($data),
+        CURLOPT_TIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_USERAGENT => 'PHP-Shop-Bot/1.0'
+    ]);
+
     $result = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    return $result !== false;
+    return $result !== false && $httpCode === 200;
 }
 
 function yukassa_create_payment($cfg, $amount, $description, $order_id){
     if(empty($cfg['yukassa']['enabled'])) return [false, 'Payments disabled'];
 
-    $shop_id = $cfg['yukassa']['shop_id'];
-    $secret_key = $cfg['yukassa']['secret_key'];
+    $shop_id = trim($cfg['yukassa']['shop_id'] ?? '');
+    $secret_key = trim($cfg['yukassa']['secret_key'] ?? '');
     $return_url = $cfg['yukassa']['return_url'] ?? ($cfg['site'] . '/payment_result.php');
 
     if(!$shop_id || !$secret_key) return [false, 'Missing shop_id or secret_key'];
+    if($amount <= 0) return [false, 'Invalid amount'];
 
     $url = 'https://api.yookassa.ru/v3/payments';
 
     $data = [
-        'amount' => ['value' => number_format($amount, 2, '.', ''), 'currency' => 'RUB'],
+        'amount' => ['value' => number_format((float)$amount, 2, '.', ''), 'currency' => 'RUB'],
         'confirmation' => ['type' => 'redirect', 'return_url' => $return_url . '?order_id=' . urlencode($order_id)],
-        'description' => $description,
+        'description' => substr($description, 0, 128),
         'metadata' => ['order_id' => (string)$order_id],
         'capture' => true
     ];
 
     $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        'Content-Type: application/json',
-        'Idempotence-Key: ' . uniqid(),
-        'Authorization: Basic ' . base64_encode($shop_id . ':' . $secret_key)
+    if ($ch === false) return [false, 'cURL initialization failed'];
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($data),
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Idempotence-Key: ' . uniqid('', true),
+            'Authorization: Basic ' . base64_encode($shop_id . ':' . $secret_key)
+        ]
     ]);
 
     $result = curl_exec($ch);
     $error = curl_error($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     if($error) return [false, 'CURL error: ' . $error];
+    if($httpCode !== 200 && $httpCode !== 201) return [false, 'HTTP error: ' . $httpCode];
 
     $response = json_decode($result, true);
     if(!$response || !isset($response['confirmation']['confirmation_url'])) {
-        return [false, 'Invalid response: ' . $result];
+        return [false, 'Invalid response: ' . ($result ?: 'empty response')];
     }
 
     return [true, $response];
@@ -106,16 +226,19 @@ function send_order_notifications($cfg, $order, $ordersLog) {
     $emailBody .= "IP: {$order['ip']}\n\n";
     $emailBody .= "Обработайте заказ в админке!";
 
-    send_email_simple($cfg['email_to'] ?? 'artcopy78@bk.ru', 'Заказ корзины #'.$order['id'], $emailBody);
+    $emailTo = filter_var($cfg['email_to'] ?? 'artcopy78@bk.ru', FILTER_VALIDATE_EMAIL);
+    if ($emailTo) {
+        send_email_simple($emailTo, 'Заказ корзины #'.$order['id'], $emailBody);
+    }
 
     // Telegram уведомление
     $tgMsg = "🛒 <b>Заказ товаров #{$order['id']}</b>\n\n";
     foreach ($order['items'] as $item) {
-        $tgMsg .= "• {$item['name']} × {$item['quantity']} = " . number_format($item['total']) . " ₽\n";
+        $tgMsg .= "• " . htmlspecialchars($item['name']) . " × {$item['quantity']} = " . number_format($item['total']) . " ₽\n";
     }
     $tgMsg .= "\n💰 <b>Итого: " . number_format($order['total_price']) . " ₽</b>\n\n";
-    $tgMsg .= "👤 {$order['name']}\n📞 {$order['phone']}\n";
-    if ($order['comment']) $tgMsg .= "💬 {$order['comment']}\n";
+    $tgMsg .= "👤 " . htmlspecialchars($order['name']) . "\n📞 " . htmlspecialchars($order['phone']) . "\n";
+    if ($order['comment']) $tgMsg .= "💬 " . htmlspecialchars($order['comment']) . "\n";
 
     if ($order['payment_method'] === 'online') {
         $tgMsg .= "💳 Онлайн оплата ✅ <b>ОПЛАЧЕН</b>";
@@ -126,49 +249,159 @@ function send_order_notifications($cfg, $order, $ordersLog) {
     tg_send_message($cfg, $tgMsg);
 }
 
+function get_product_reviews($reviews, $product_id) {
+    return array_filter($reviews, function($review) use ($product_id) {
+        return $review['product_id'] == $product_id && $review['approved'];
+    });
+}
+
+function get_average_rating($reviews, $product_id) {
+    $productReviews = get_product_reviews($reviews, $product_id);
+    if (empty($productReviews)) return 0;
+
+    $totalRating = array_sum(array_column($productReviews, 'rating'));
+    return round($totalRating / count($productReviews), 1);
+}
+
+function render_stars($rating) {
+    $html = '';
+    for ($i = 1; $i <= 5; $i++) {
+        if ($i <= $rating) {
+            $html .= '⭐';
+        } else {
+            $html .= '☆';
+        }
+    }
+    return $html;
+}
+
+// Защита от CSRF
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isset($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+
+    // Для API запросов проверяем referer
+    $referer = $_SERVER['HTTP_REFERER'] ?? '';
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if (!$referer || parse_url($referer, PHP_URL_HOST) !== $host) {
+        http_response_code(403);
+        exit('Forbidden');
+    }
+}
+
+// Обработка добавления отзыва
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['mode'] ?? '') === 'add_review') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        $product_id = (int)($_POST['product_id'] ?? 0);
+        $name = sanitize_text($_POST['name'] ?? '');
+        $rating = (int)($_POST['rating'] ?? 0);
+        $comment = sanitize_text($_POST['comment'] ?? '');
+
+        if (!$product_id || $rating < 1 || $rating > 5 || !$name || !$comment) {
+            throw new Exception('Заполните все обязательные поля корректно.');
+        }
+
+        if (strlen($name) < 2 || strlen($comment) < 10) {
+            throw new Exception('Имя должно содержать минимум 2 символа, отзыв - минимум 10.');
+        }
+
+        $newReview = [
+            'id' => time() . rand(100, 999),
+            'product_id' => $product_id,
+            'name' => $name,
+            'rating' => $rating,
+            'comment' => $comment,
+            'date' => date('Y-m-d'),
+            'approved' => false // Требует модерации
+        ];
+
+        $reviews[] = $newReview;
+        file_put_contents($reviewsFile, json_encode($reviews, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+        echo json_encode(['ok' => true, 'message' => 'Спасибо за отзыв! Он будет опубликован после модерации.']);
+        exit;
+
+    } catch (Exception $e) {
+        echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+        exit;
+    }
+}
+
 // Обработка заказа корзины
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['mode'] ?? '') === 'cart_order') {
     header('Content-Type: application/json; charset=utf-8');
+
     try {
+        // Валидация данных
         $name = sanitize_text($_POST['name'] ?? '');
         $phone = sanitize_text($_POST['phone'] ?? '');
         $comment = sanitize_text($_POST['comment'] ?? '');
         $cart = json_decode($_POST['cart'] ?? '[]', true);
         $payment_method = sanitize_text($_POST['payment_method'] ?? 'offline');
 
-        if (!$name || !$phone) throw new Exception('Укажите имя и телефон.');
-        if (empty($cart)) throw new Exception('Корзина пуста.');
+        // Проверки
+        if (!$name || strlen($name) < 2) throw new Exception('Укажите корректное имя (минимум 2 символа).');
+        if (!$phone || !validate_phone($phone)) throw new Exception('Укажите корректный номер телефона.');
+        if (!is_array($cart) || empty($cart)) throw new Exception('Корзина пуста или повреждена.');
+        if (!in_array($payment_method, ['online', 'offline'])) throw new Exception('Некорректный способ оплаты.');
 
         $totalPrice = 0;
         $orderItems = [];
 
+        // Проверяем каждый товар в корзине
         foreach ($cart as $item) {
+            if (!isset($item['id'], $item['quantity']) || !is_numeric($item['id']) || !is_numeric($item['quantity'])) {
+                throw new Exception('Некорректные данные товара в корзине.');
+            }
+
+            $productId = (int)$item['id'];
+            $quantity = (int)$item['quantity'];
+
+            if ($quantity <= 0 || $quantity > 999) {
+                throw new Exception('Некорректное количество товара.');
+            }
+
+            // Найти товар в каталоге
             $product = null;
             foreach ($products as $p) {
-                if ($p['id'] == $item['id'] && $p['enabled']) {
+                if ((int)$p['id'] === $productId && !empty($p['enabled'])) {
                     $product = $p;
                     break;
                 }
             }
 
-            if (!$product) continue;
-            if ($product['stock'] < $item['quantity']) throw new Exception('Недостаточно товара на складе: ' . $product['name']);
+            if (!$product) {
+                throw new Exception('Товар с ID ' . $productId . ' не найден или недоступен.');
+            }
 
-            $itemTotal = $product['price'] * $item['quantity'];
+            if ((int)$product['stock'] < $quantity) {
+                throw new Exception('Недостаточно товара на складе: ' . $product['name'] . ' (доступно: ' . $product['stock'] . ')');
+            }
+
+            $itemTotal = (float)$product['price'] * $quantity;
             $totalPrice += $itemTotal;
+
             $orderItems[] = [
-                'product_id'=>$product['id'],
+                'product_id' => $productId,
                 'name' => $product['name'],
-                'price' => $product['price'],
-                'quantity' => $item['quantity'],
+                'price' => (float)$product['price'],
+                'quantity' => $quantity,
                 'total' => $itemTotal
             ];
         }
 
-        $order_id = 'cart_'.time().'_'.rand(1000,9999);
+        if ($totalPrice <= 0) {
+            throw new Exception('Некорректная общая сумма заказа.');
+        }
+
+        // Генерация уникального ID заказа
+        $order_id = 'cart_' . date('Ymd_His') . '_' . rand(1000, 9999);
 
         $order = [
-            'id'=>$order_id,
+            'id' => $order_id,
             'type' => 'cart',
             'ts' => date('Y-m-d H:i:s'),
             'items' => $orderItems,
@@ -177,44 +410,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['mode'] ?? '') === 'cart_or
             'phone' => $phone,
             'comment' => $comment,
             'payment_method' => $payment_method,
-            'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+            'ip' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+            'user_agent' => substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 255),
             'status' => $payment_method === 'online' ? 'pending_payment' : 'new'
         ];
 
-        // Всегда логируем заказ
+        // Логируем заказ
         log_order($ordersLog, $order);
 
         $response = ['ok' => true, 'order_id' => $order_id];
 
-        // ✅ ИСПРАВЛЕНИЕ: Разная логика для онлайн и оффлайн заказов
+        // Обработка способа оплаты
         if ($payment_method === 'online' && $totalPrice > 0) {
-            // Для онлайн оплаты - НЕ отправляем уведомления сразу
+            // Для онлайн оплаты - создаем платеж
             list($payOk, $payResult) = yukassa_create_payment($cfg, $totalPrice, "Заказ товаров #$order_id", $order_id);
+
             if ($payOk) {
                 $response['payment'] = true;
                 $response['payment_url'] = $payResult['confirmation']['confirmation_url'];
                 $response['payment_id'] = $payResult['id'];
                 $response['message'] = 'Заказ создан. Переходим к оплате...';
             } else {
-                // Если не удалось создать платеж, отправляем как обычный заказ
+                // Если не удалось создать платеж, переводим в оффлайн режим
                 $order['status'] = 'new';
                 $order['payment_method'] = 'offline';
-                log_order($ordersLog, ['updated_order' => $order]);
+                log_order($ordersLog, ['updated_order' => $order, 'payment_error' => $payResult]);
                 send_order_notifications($cfg, $order, $ordersLog);
-                $response['message'] = 'Заказ принят. Ошибка создания платежа: ' . $payResult . '. Оплата при получении.';
+                $response['message'] = 'Заказ принят. Ошибка создания онлайн-платежа, оплата при получении.';
             }
         } else {
-            // Для оффлайн заказов - отправляем уведомления сразу
+            // Для оффлайн заказов - сразу отправляем уведомления
             send_order_notifications($cfg, $order, $ordersLog);
             $response['message'] = 'Заказ принят! Мы свяжемся с вами для подтверждения.';
         }
 
-        echo json_encode($response);
+        echo json_encode($response, JSON_UNESCAPED_UNICODE);
         exit;
 
     } catch (Exception $e) {
-        echo json_encode(['ok' => false, 'message' => $e->getMessage()]);
+        error_log("Order error: " . $e->getMessage());
+        echo json_encode(['ok' => false, 'message' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
         exit;
+    } catch (Error $e) {
+        error_log("Order fatal error: " . $e->getMessage());
+        echo json_encode(['ok' => false, 'message' => 'Внутренняя ошибка сервера.'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+// Создаем CSRF токен для формы
+if (!isset($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+// Проверка режима просмотра товара
+$productView = null;
+if (isset($_GET['product']) && is_numeric($_GET['product'])) {
+    $productId = (int)$_GET['product'];
+    foreach ($products as $p) {
+        if ((int)$p['id'] === $productId && !empty($p['enabled'])) {
+            $productView = $p;
+            break;
+        }
     }
 }
 
@@ -226,14 +483,21 @@ $categories = [
 ];
 
 $filterCategory = $_GET['cat'] ?? 'all';
-$filteredProducts = $filterCategory === 'all' ? $products : array_filter($products, fn($p) => $p['category'] === $filterCategory);
-$filteredProducts = array_filter($filteredProducts, fn($p) => $p['enabled']); // Только активные
+if ($filterCategory !== 'all' && !array_key_exists($filterCategory, $categories)) {
+    $filterCategory = 'all';
+}
+
+$filteredProducts = $filterCategory === 'all' ? $products : array_filter($products, fn($p) => ($p['category'] ?? '') === $filterCategory);
+$filteredProducts = array_filter($filteredProducts, fn($p) => !empty($p['enabled'])); // Только активные
 
 // Сортировка: сначала рекомендуемые, потом по алфавиту
 usort($filteredProducts, function($a, $b) {
-    if ($a['featured'] && !$b['featured']) return -1;
-    if (!$a['featured'] && $b['featured']) return 1;
-    return strcasecmp($a['name'], $b['name']);
+    $aFeatured = !empty($a['featured']);
+    $bFeatured = !empty($b['featured']);
+
+    if ($aFeatured && !$bFeatured) return -1;
+    if (!$aFeatured && $bFeatured) return 1;
+    return strcasecmp($a['name'] ?? '', $b['name'] ?? '');
 });
 
 // Тема оформления
@@ -246,8 +510,14 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>Товары - <?=esc($cfg['brand'] ?? 'Фотоцентр ПРИНТСС')?></title>
-    <meta name='description' content='Фоторамки, фотоальбомы, кружки с фото, магниты и другие сувениры. Быстрое изготовление в Сосновом Бору.'>
+    <?php if ($productView): ?>
+        <title><?=esc($productView['name'])?> - <?=esc($cfg['brand'] ?? 'Фотоцентр ПРИНТСС')?></title>
+        <meta name='description' content='<?=esc($productView['description'] ?? '')?>'>
+    <?php else: ?>
+        <title>Товары - <?=esc($cfg['brand'] ?? 'Фотоцентр ПРИНТСС')?></title>
+        <meta name='description' content='Фоторамки, фотоальбомы, кружки с фото, магниты и другие сувениры. Быстрое изготовление в Сосновом Бору.'>
+    <?php endif; ?>
+    <meta name="robots" content="index, follow">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -263,15 +533,20 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             max-width: 1200px; margin: 0 auto; padding: 0 20px;
             display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px; 
         }
-        .logo { font-size: 24px; font-weight: 700; color: <?=$brandCol?>; }
+        .logo { font-size: 24px; font-weight: 700; color: <?=esc($brandCol)?>; }
         .nav a { margin: 0 15px; color: #6c757d; font-weight: 500; text-decoration: none; }
-        .nav a:hover { color: <?=$accentCol?>; }
+        .nav a:hover { color: <?=esc($accentCol)?>; }
 
         .container { max-width: 1200px; margin: 0 auto; padding: 40px 20px; }
 
         .hero { text-align: center; margin-bottom: 40px; }
         .hero h1 { font-size: 36px; font-weight: 700; margin-bottom: 15px; color: #212529; }
         .hero p { font-size: 18px; color: #6c757d; margin-bottom: 25px; }
+
+        .breadcrumbs { margin-bottom: 30px; }
+        .breadcrumbs a { color: <?=esc($accentCol)?>; text-decoration: none; }
+        .breadcrumbs a:hover { text-decoration: underline; }
+        .breadcrumbs span { color: #6c757d; margin: 0 8px; }
 
         .toolbar { 
             display: flex; justify-content: space-between; align-items: center; 
@@ -284,10 +559,10 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             color: #495057; font-weight: 500; text-decoration: none;
             transition: all 0.2s; font-size: 14px; 
         }
-        .filter-btn:hover, .filter-btn.active { background: <?=$accentCol?>; color: white; border-color: <?=$accentCol?>; }
+        .filter-btn:hover, .filter-btn.active { background: <?=esc($accentCol)?>; color: white; border-color: <?=esc($accentCol)?>; }
 
         .cart-toggle { 
-            background: <?=$brandCol?>; color: white; border: none; padding: 10px 16px;
+            background: <?=esc($brandCol)?>; color: white; border: none; padding: 10px 16px;
             border-radius: 6px; font-weight: 600; cursor: pointer; position: relative; 
         }
         .cart-count { 
@@ -296,6 +571,16 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             display: flex; align-items: center; justify-content: center; 
         }
 
+        /* Плавающая корзина */
+        .floating-cart { 
+            position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+            background: <?=esc($brandCol)?>; color: white; border-radius: 50px;
+            padding: 15px 20px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            transition: all 0.2s; font-weight: 600; display: none; 
+        }
+        .floating-cart:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+        .floating-cart.show { display: flex; align-items: center; gap: 8px; }
+
         .products-grid { 
             display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
             gap: 20px; margin-bottom: 50px; 
@@ -303,7 +588,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 
         .product-card { 
             background: white; border: 1px solid #e9ecef; border-radius: 8px;
-            overflow: hidden; transition: all 0.2s; position: relative; 
+            overflow: hidden; transition: all 0.2s; position: relative; cursor: pointer;
         }
         .product-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); transform: translateY(-2px); }
         .product-card.featured::before { 
@@ -331,17 +616,82 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; 
         }
 
+        .product-rating { margin-bottom: 10px; font-size: 14px; }
+        .rating-stars { color: #ffc107; }
+
         .stock-info { color: #6c757d; font-size: 12px; margin-bottom: 15px; }
         .stock-low { color: #dc3545; font-weight: 600; }
 
         .add-to-cart-btn { 
-            width: 100%; background: <?=$accentCol?>;
+            width: 100%; background: <?=esc($accentCol)?>;
             color: white; border: none; padding: 10px; border-radius: 6px;
             font-size: 14px; font-weight: 600; cursor: pointer;
             transition: all 0.2s; 
         }
         .add-to-cart-btn:hover { opacity: 0.9; }
         .add-to-cart-btn:disabled { background: #adb5bd; cursor: not-allowed; }
+
+        /* Детальный просмотр товара */
+        .product-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-bottom: 40px; }
+        .product-gallery { }
+        .product-main-image { 
+            width: 100%; height: 400px; background: #f8f9fa; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center; overflow: hidden; margin-bottom: 15px;
+        }
+        .product-main-image img { width: 100%; height: 100%; object-fit: cover; }
+        .product-main-image .no-image { color: #adb5bd; font-size: 96px; }
+
+        .product-detail-info { }
+        .product-detail-title { font-size: 32px; font-weight: 700; margin-bottom: 15px; }
+        .product-detail-description { font-size: 16px; color: #6c757d; margin-bottom: 20px; }
+        .product-detail-price { margin-bottom: 25px; }
+        .product-detail-price .current-price { font-size: 28px; }
+
+        .quantity-selector { 
+            display: flex; align-items: center; gap: 10px; margin: 20px 0; 
+        }
+        .qty-controls { display: flex; align-items: center; border: 1px solid #dee2e6; border-radius: 6px; }
+        .qty-controls button { background: none; border: none; padding: 10px 15px; cursor: pointer; font-size: 18px; }
+        .qty-controls input { border: none; width: 60px; text-align: center; padding: 10px 5px; font-size: 16px; }
+
+        .product-actions { margin-bottom: 30px; }
+        .add-to-cart-detail { 
+            background: <?=esc($accentCol)?>; color: white; border: none; padding: 15px 30px;
+            border-radius: 6px; font-size: 16px; font-weight: 600; cursor: pointer;
+            width: 100%; margin-bottom: 15px;
+        }
+
+        .product-tabs { margin-bottom: 40px; }
+        .tab-buttons { display: flex; border-bottom: 1px solid #dee2e6; margin-bottom: 25px; }
+        .tab-btn { 
+            background: none; border: none; padding: 15px 25px; font-size: 16px; font-weight: 600;
+            color: #6c757d; cursor: pointer; border-bottom: 2px solid transparent; 
+        }
+        .tab-btn.active { color: <?=esc($accentCol)?>; border-bottom-color: <?=esc($accentCol)?>; }
+
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .specifications { }
+        .spec-row { 
+            display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f8f9fa; 
+        }
+        .spec-row:last-child { border-bottom: none; }
+
+        .reviews-section { }
+        .review-item { 
+            background: white; padding: 20px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #e9ecef; 
+        }
+        .review-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .review-author { font-weight: 600; }
+        .review-date { color: #6c757d; font-size: 14px; }
+        .review-rating { color: #ffc107; margin-bottom: 10px; }
+        .review-text { color: #495057; line-height: 1.6; }
+
+        .review-form { 
+            background: white; padding: 25px; border-radius: 8px; border: 1px solid #e9ecef; margin-top: 25px; 
+        }
+        .review-form h4 { margin-bottom: 20px; }
 
         .cart-sidebar { 
             position: fixed; top: 0; right: -400px; width: 400px; height: 100vh;
@@ -406,15 +756,26 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
 
         .form-group { margin-bottom: 20px; }
         .form-group label { display: block; font-weight: 600; margin-bottom: 6px; color: #495057; }
-        .form-group input, .form-group textarea { 
+        .form-group input, .form-group textarea, .form-group select { 
             width: 100%; padding: 10px 12px;
             border: 1px solid #ced4da; border-radius: 6px;
             font-size: 14px; 
         }
-        .form-group input:focus, .form-group textarea:focus { border-color: <?=$accentCol?>; outline: none; }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { 
+            border-color: <?=esc($accentCol)?>; outline: none; 
+        }
+
+        .rating-input { display: flex; gap: 5px; align-items: center; }
+        .rating-input input[type="radio"] { display: none; }
+        .rating-input label { 
+            font-size: 24px; color: #ddd; cursor: pointer; transition: color 0.2s; 
+        }
+        .rating-input input[type="radio"]:checked ~ label,
+        .rating-input label:hover,
+        .rating-input label:hover ~ label { color: #ffc107; }
 
         .submit-btn { 
-            width: 100%; background: <?=$accentCol?>;
+            width: 100%; background: <?=esc($accentCol)?>;
             color: white; border: none; padding: 12px; border-radius: 6px;
             font-size: 16px; font-weight: 600; cursor: pointer; 
         }
@@ -440,15 +801,19 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         @media (max-width: 768px) {
             .hero h1 { font-size: 28px; }
             .products-grid { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 15px; }
+            .product-detail { grid-template-columns: 1fr; gap: 20px; }
+            .product-detail-title { font-size: 24px; }
             .header-content { justify-content: center; text-align: center; }
             .nav { margin-top: 10px; }
             .cart-sidebar { width: 100vw; right: -100vw; }
             .toolbar { flex-direction: column; align-items: stretch; }
+            .floating-cart { bottom: 10px; right: 10px; font-size: 14px; padding: 12px 16px; }
         }
 
         @media (max-width: 480px) {
             .products-grid { grid-template-columns: 1fr; }
             .container { padding: 20px 15px; }
+            .product-main-image { height: 250px; }
         }
 
         .notification {
@@ -456,6 +821,10 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             padding: 15px 20px; border-radius: 6px; z-index: 1200; font-weight: 600;
             box-shadow: 0 4px 12px rgba(0,0,0,0.2);
             animation: slideIn 0.3s ease-out;
+        }
+
+        .notification.error {
+            background: #dc3545;
         }
 
         @keyframes slideIn {
@@ -470,7 +839,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             <div class='logo'><?=esc($cfg['brand'] ?? 'ПРИНТСС')?></div>
             <nav class='nav'>
                 <a href='/'>🏠 Главная</a>
-                <a href='products.php' style='color: <?=$accentCol?>; font-weight: 700;'>🛍️ Товары</a>
+                <a href='products.php' style='color: <?=esc($accentCol)?>; font-weight: 700;'>🛍️ Товары</a>
                 <a href='/#catalog'>📋 Услуги</a>
                 <a href='tel:+79522003990'>📞 +7 (952) 200-39-90</a>
             </nav>
@@ -478,89 +847,277 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
     </header>
 
     <div class='container'>
-        <div class='hero'>
-            <h1>🛍️ Товары для фото и подарков</h1>
-            <p>Качественные фоторамки, альбомы и сувениры. Персональные заказы под ваши фото.</p>
-        </div>
-
-        <div class='toolbar'>
-            <div class='filters'>
-                <a href='?cat=all' class='filter-btn <?=$filterCategory === 'all' ? 'active' : ''?>'>
-                    Все товары (<?=count(array_filter($products, fn($p) => $p['enabled']))?>)
-                </a>
-                <?php foreach ($categories as $cat => $name): ?>
-                    <?php $count = count(array_filter($products, fn($p) => $p['category'] === $cat && $p['enabled'])); ?>
-                    <a href='?cat=<?=$cat?>' class='filter-btn <?=$filterCategory === $cat ? 'active' : ''?>'>
-                        <?=$name?> (<?=$count?>)
-                    </a>
-                <?php endforeach; ?>
+        <?php if ($productView): ?>
+            <!-- Детальный просмотр товара -->
+            <div class='breadcrumbs'>
+                <a href='products.php'>Товары</a>
+                <span>→</span>
+                <span><?=esc($productView['name'])?></span>
             </div>
 
-            <button class='cart-toggle' onclick='toggleCart()'>
-                🛒 Корзина <span class='cart-count' id='cartCount'>0</span>
-            </button>
-        </div>
+            <div class='product-detail'>
+                <div class='product-gallery'>
+                    <div class='product-main-image'>
+                        <?php if (!empty($productView['image']) && file_exists(__DIR__ . '/uploads/' . $productView['image'])): ?>
+                            <img src='uploads/<?=esc($productView['image'])?>' alt='<?=esc($productView['name'])?>' loading="lazy">
+                        <?php else: ?>
+                            <div class='no-image'>📦</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
 
-        <?php if (empty($filteredProducts)): ?>
-            <div class='empty-state'>
-                <div style='font-size: 64px; margin-bottom: 20px;'>📦</div>
-                <h3>Товары не найдены</h3>
-                <p>В данной категории пока нет доступных товаров.</p>
-                <p style='margin-top: 20px;'><a href='?cat=all' class='filter-btn'>Посмотреть все товары</a></p>
-            </div>
-        <?php else: ?>
-            <div class='products-grid'>
-                <?php foreach ($filteredProducts as $product): ?>
-                    <div class='product-card <?=$product['featured'] ? 'featured' : ''?>'>
-                        <div class='product-image'>
-                            <?php if ($product['image'] && file_exists(__DIR__ . '/uploads/' . $product['image'])): ?>
-                                <img src='uploads/<?=esc($product['image'])?>' alt='<?=esc($product['name'])?>'>
-                            <?php else: ?>
-                                <div class='no-image'>📦</div>
-                            <?php endif; ?>
+                <div class='product-detail-info'>
+                    <h1 class='product-detail-title'><?=esc($productView['name'])?></h1>
+
+                    <?php 
+                    $avgRating = get_average_rating($reviews, $productView['id']);
+                    $productReviews = get_product_reviews($reviews, $productView['id']);
+                    ?>
+                    <?php if ($avgRating > 0): ?>
+                        <div class='product-rating'>
+                            <span class='rating-stars'><?=render_stars($avgRating)?></span>
+                            <span>(<?=$avgRating?>/5, <?=count($productReviews)?> отзывов)</span>
+                        </div>
+                    <?php endif; ?>
+
+                    <p class='product-detail-description'><?=esc($productView['description'] ?? '')?></p>
+
+                    <div class='product-detail-price product-price'>
+                        <span class='current-price'><?=number_format((float)($productView['price'] ?? 0), 0, ',', ' ')?> ₽</span>
+                        <?php if (!empty($productView['old_price']) && $productView['old_price'] > 0): ?>
+                            <span class='old-price'><?=number_format((float)$productView['old_price'], 0, ',', ' ')?> ₽</span>
+                            <span class='discount'>-<?=round((1 - ($productView['price'] ?? 0)/($productView['old_price'] ?? 1)) * 100)?>%</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div class='stock-info <?=(($productView['stock'] ?? 0) < 5) ? 'stock-low' : ''?>'>
+                        <?php $stock = (int)($productView['stock'] ?? 0); ?>
+                        <?php if ($stock > 0): ?>
+                            ✅ В наличии: <?=$stock?> шт
+                            <?php if ($stock < 5): ?> (мало!)<?php endif; ?>
+                        <?php else: ?>
+                            ❌ Нет в наличии
+                        <?php endif; ?>
+                    </div>
+
+                    <?php if ($stock > 0): ?>
+                        <div class='quantity-selector'>
+                            <label>Количество:</label>
+                            <div class='qty-controls'>
+                                <button onclick='changeQty(-1)'>−</button>
+                                <input type='number' id='productQty' value='1' min='1' max='<?=$stock?>'>
+                                <button onclick='changeQty(1)'>+</button>
+                            </div>
                         </div>
 
-                        <div class='product-info'>
-                            <h3 class='product-title'><?=esc($product['name'])?></h3>
-                            <p class='product-description'><?=esc($product['description'])?></p>
+                        <div class='product-actions'>
+                            <button class='add-to-cart-detail' 
+                                    data-id='<?=(int)($productView['id'] ?? 0)?>'
+                                    data-name='<?=esc($productView['name'] ?? 'Товар')?>'
+                                    data-price='<?=(float)($productView['price'] ?? 0)?>'
+                                    data-image='<?=esc($productView['image'] ?? '')?>'
+                                    data-stock='<?=$stock?>'
+                                    onclick='addToCartDetail(this)'>
+                                🛒 Добавить в корзину
+                            </button>
+                        </div>
+                    <?php else: ?>
+                        <div class='product-actions'>
+                            <button class='add-to-cart-detail' disabled style='background: #adb5bd; cursor: not-allowed;'>
+                                ❌ Нет в наличии
+                            </button>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
 
-                            <div class='product-price'>
-                                <span class='current-price'><?=number_format($product['price'], 0, ',', ' ')?> ₽</span>
-                                <?php if ($product['old_price'] > 0): ?>
-                                    <span class='old-price'><?=number_format($product['old_price'], 0, ',', ' ')?> ₽</span>
-                                    <span class='discount'>-<?=round((1 - $product['price']/$product['old_price']) * 100)?>%</span>
-                                <?php endif; ?>
-                            </div>
+            <div class='product-tabs'>
+                <div class='tab-buttons'>
+                    <button class='tab-btn active' onclick='switchTab("description")'>📖 Описание</button>
+                    <?php if (!empty($productView['specifications'])): ?>
+                        <button class='tab-btn' onclick='switchTab("specs")'>📋 Характеристики</button>
+                    <?php endif; ?>
+                    <button class='tab-btn' onclick='switchTab("reviews")'>⭐ Отзывы (<?=count($productReviews)?>)</button>
+                </div>
 
-                            <div class='stock-info <?=$product['stock'] < 5 ? 'stock-low' : ''?>'>
-                                <?php if ($product['stock'] > 0): ?>
-                                    ✅ В наличии: <?=$product['stock']?> шт
-                                    <?php if ($product['stock'] < 5): ?> (мало!)<?php endif; ?>
-                                <?php else: ?>
-                                    ❌ Нет в наличии
-                                <?php endif; ?>
-                            </div>
+                <div class='tab-content active' id='tab-description'>
+                    <p><?=nl2br(esc($productView['full_description'] ?? $productView['description'] ?? 'Подробное описание отсутствует.'))?></p>
+                </div>
 
-                            <?php if ($product['stock'] > 0): ?>
-                                <button class='add-to-cart-btn' 
-                                        data-id='<?=$product['id']?>'
-                                        data-name='<?=esc($product['name'])?>'
-                                        data-price='<?=$product['price']?>'
-                                        data-image='<?=esc($product['image'] ?? '')?>'
-                                        data-stock='<?=$product['stock']?>'
-                                        onclick='addToCart(this)'>
-                                    🛒 Добавить в корзину
-                                </button>
-                            <?php else: ?>
-                                <button class='add-to-cart-btn' disabled>
-                                    ❌ Нет в наличии
-                                </button>
-                            <?php endif; ?>
+                <?php if (!empty($productView['specifications'])): ?>
+                    <div class='tab-content' id='tab-specs'>
+                        <div class='specifications'>
+                            <?php foreach ($productView['specifications'] as $key => $value): ?>
+                                <div class='spec-row'>
+                                    <strong><?=esc($key)?>:</strong>
+                                    <span><?=esc($value)?></span>
+                                </div>
+                            <?php endforeach; ?>
                         </div>
                     </div>
-                <?php endforeach; ?>
+                <?php endif; ?>
+
+                <div class='tab-content' id='tab-reviews'>
+                    <div class='reviews-section'>
+                        <?php if (empty($productReviews)): ?>
+                            <p>Отзывов пока нет. Будьте первым!</p>
+                        <?php else: ?>
+                            <?php foreach ($productReviews as $review): ?>
+                                <div class='review-item'>
+                                    <div class='review-header'>
+                                        <span class='review-author'><?=esc($review['name'])?></span>
+                                        <span class='review-date'><?=date('d.m.Y', strtotime($review['date']))?></span>
+                                    </div>
+                                    <div class='review-rating'><?=render_stars($review['rating'])?></div>
+                                    <div class='review-text'><?=nl2br(esc($review['comment']))?></div>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+
+                        <div class='review-form'>
+                            <h4>Оставить отзыв</h4>
+                            <form id='reviewForm'>
+                                <input type='hidden' name='mode' value='add_review'>
+                                <input type='hidden' name='product_id' value='<?=(int)($productView['id'] ?? 0)?>'>
+
+                                <div class='form-group'>
+                                    <label>Ваше имя *</label>
+                                    <input type='text' name='name' required minlength='2' maxlength='50'>
+                                </div>
+
+                                <div class='form-group'>
+                                    <label>Оценка *</label>
+                                    <div class='rating-input'>
+                                        <input type='radio' name='rating' value='5' id='star5'>
+                                        <label for='star5'>★</label>
+                                        <input type='radio' name='rating' value='4' id='star4'>
+                                        <label for='star4'>★</label>
+                                        <input type='radio' name='rating' value='3' id='star3'>
+                                        <label for='star3'>★</label>
+                                        <input type='radio' name='rating' value='2' id='star2'>
+                                        <label for='star2'>★</label>
+                                        <input type='radio' name='rating' value='1' id='star1'>
+                                        <label for='star1'>★</label>
+                                    </div>
+                                </div>
+
+                                <div class='form-group'>
+                                    <label>Отзыв *</label>
+                                    <textarea name='comment' rows='4' required minlength='10' maxlength='500' placeholder='Расскажите о своем опыте использования товара...'></textarea>
+                                </div>
+
+                                <button type='submit' class='submit-btn'>📝 Отправить отзыв</button>
+                                <div id='reviewStatus' style='margin-top: 15px; text-align: center; font-weight: 600;'></div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
             </div>
+
+        <?php else: ?>
+            <!-- Список товаров -->
+            <div class='hero'>
+                <h1>🛍️ Товары для фото и подарков</h1>
+                <p>Качественные фоторамки, альбомы и сувениры. Персональные заказы под ваши фото.</p>
+            </div>
+
+            <div class='toolbar'>
+                <div class='filters'>
+                    <a href='?cat=all' class='filter-btn <?=$filterCategory === 'all' ? 'active' : ''?>'>
+                        Все товары (<?=count(array_filter($products, fn($p) => !empty($p['enabled'])))?>)
+                    </a>
+                    <?php foreach ($categories as $cat => $name): ?>
+                        <?php $count = count(array_filter($products, fn($p) => ($p['category'] ?? '') === $cat && !empty($p['enabled']))); ?>
+                        <a href='?cat=<?=esc($cat)?>' class='filter-btn <?=$filterCategory === $cat ? 'active' : ''?>'>
+                            <?=esc($name)?> (<?=$count?>)
+                        </a>
+                    <?php endforeach; ?>
+                </div>
+
+                <button class='cart-toggle' onclick='toggleCart()'>
+                    🛒 Корзина <span class='cart-count' id='cartCount'>0</span>
+                </button>
+            </div>
+
+            <?php if (empty($filteredProducts)): ?>
+                <div class='empty-state'>
+                    <div style='font-size: 64px; margin-bottom: 20px;'>📦</div>
+                    <h3>Товары не найдены</h3>
+                    <p>В данной категории пока нет доступных товаров.</p>
+                    <p style='margin-top: 20px;'><a href='?cat=all' class='filter-btn'>Посмотреть все товары</a></p>
+                </div>
+            <?php else: ?>
+                <div class='products-grid'>
+                    <?php foreach ($filteredProducts as $product): ?>
+                        <div class='product-card <?=!empty($product['featured']) ? 'featured' : ''?>' onclick='viewProduct(<?=(int)($product['id'] ?? 0)?>)'>
+                            <div class='product-image'>
+                                <?php if (!empty($product['image']) && file_exists(__DIR__ . '/uploads/' . $product['image'])): ?>
+                                    <img src='uploads/<?=esc($product['image'])?>' alt='<?=esc($product['name'] ?? 'Товар')?>' loading="lazy">
+                                <?php else: ?>
+                                    <div class='no-image'>📦</div>
+                                <?php endif; ?>
+                            </div>
+
+                            <div class='product-info'>
+                                <h3 class='product-title'><?=esc($product['name'] ?? 'Без названия')?></h3>
+
+                                <?php 
+                                $avgRating = get_average_rating($reviews, $product['id']);
+                                $reviewCount = count(get_product_reviews($reviews, $product['id']));
+                                ?>
+                                <?php if ($avgRating > 0): ?>
+                                    <div class='product-rating'>
+                                        <span class='rating-stars'><?=render_stars($avgRating)?></span>
+                                        <small>(<?=$reviewCount?>)</small>
+                                    </div>
+                                <?php endif; ?>
+
+                                <p class='product-description'><?=esc($product['description'] ?? '')?></p>
+
+                                <div class='product-price'>
+                                    <span class='current-price'><?=number_format((float)($product['price'] ?? 0), 0, ',', ' ')?> ₽</span>
+                                    <?php if (!empty($product['old_price']) && $product['old_price'] > 0): ?>
+                                        <span class='old-price'><?=number_format((float)$product['old_price'], 0, ',', ' ')?> ₽</span>
+                                        <span class='discount'>-<?=round((1 - ($product['price'] ?? 0)/($product['old_price'] ?? 1)) * 100)?>%</span>
+                                    <?php endif; ?>
+                                </div>
+
+                                <div class='stock-info <?=(($product['stock'] ?? 0) < 5) ? 'stock-low' : ''?>'>
+                                    <?php $stock = (int)($product['stock'] ?? 0); ?>
+                                    <?php if ($stock > 0): ?>
+                                        ✅ В наличии: <?=$stock?> шт
+                                        <?php if ($stock < 5): ?> (мало!)<?php endif; ?>
+                                    <?php else: ?>
+                                        ❌ Нет в наличии
+                                    <?php endif; ?>
+                                </div>
+
+                                <?php if ($stock > 0): ?>
+                                    <button class='add-to-cart-btn' 
+                                            data-id='<?=(int)($product['id'] ?? 0)?>'
+                                            data-name='<?=esc($product['name'] ?? 'Товар')?>'
+                                            data-price='<?=(float)($product['price'] ?? 0)?>'
+                                            data-image='<?=esc($product['image'] ?? '')?>'
+                                            data-stock='<?=$stock?>'
+                                            onclick='event.stopPropagation(); addToCart(this)'>
+                                        🛒 Добавить в корзину
+                                    </button>
+                                <?php else: ?>
+                                    <button class='add-to-cart-btn' disabled>
+                                        ❌ Нет в наличии
+                                    </button>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
         <?php endif; ?>
+    </div>
+
+    <!-- Плавающая корзина -->
+    <div class='floating-cart' id='floatingCart' onclick='toggleCart()'>
+        🛒 <span id='floatingCartCount'>0</span> товаров
     </div>
 
     <!-- Overlay для корзины -->
@@ -570,7 +1127,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
     <div class='cart-sidebar' id='cartSidebar'>
         <div class='cart-header'>
             <h3>🛒 Корзина</h3>
-            <button class='cart-close' onclick='closeCart()'>&times;</button>
+            <button class='cart-close' onclick='closeCart()' aria-label="Закрыть корзину">&times;</button>
         </div>
         <div class='cart-body' id='cartBody'>
             <div style='text-align: center; color: #6c757d; padding: 40px 20px;'>
@@ -592,7 +1149,7 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         <div class='modal-content'>
             <div class='modal-header'>
                 <h2 class='modal-title'>Оформление заказа</h2>
-                <button class='close-btn' onclick='closeCheckout()'>&times;</button>
+                <button class='close-btn' onclick='closeCheckout()' aria-label="Закрыть">&times;</button>
             </div>
             <div class='modal-body'>
                 <form id='checkoutForm'>
@@ -600,18 +1157,18 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
                     <input type='hidden' name='cart' id='cartData'>
 
                     <div class='form-group'>
-                        <label>👤 Ваше имя *</label>
-                        <input type='text' name='name' required placeholder='Введите ваше имя'>
+                        <label for='customerName'>👤 Ваше имя *</label>
+                        <input type='text' id='customerName' name='name' required minlength="2" maxlength="100" placeholder='Введите ваше имя'>
                     </div>
 
                     <div class='form-group'>
-                        <label>📞 Телефон *</label>
-                        <input type='tel' name='phone' required placeholder='+7 (999) 123-45-67'>
+                        <label for='customerPhone'>📞 Телефон *</label>
+                        <input type='tel' id='customerPhone' name='phone' required placeholder='+7 (999) 123-45-67'>
                     </div>
 
                     <div class='form-group'>
-                        <label>💬 Комментарий (необязательно)</label>
-                        <textarea name='comment' rows='3' placeholder='Особые пожелания или вопросы...'></textarea>
+                        <label for='customerComment'>💬 Комментарий (необязательно)</label>
+                        <textarea id='customerComment' name='comment' rows='3' maxlength="500" placeholder='Особые пожелания или вопросы...'></textarea>
                     </div>
 
                     <?php if (!empty($cfg['yukassa']['enabled'])): ?>
@@ -647,118 +1204,257 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             <p><strong><?=esc($cfg['brand'] ?? 'Фотоцентр ПРИНТСС')?></strong></p>
             <p><?=esc($cfg['address'] ?? 'г. Сосновый Бор, ул. Красных Фортов, 49')?></p>
             <p style='margin-top: 10px;'>
-                <a href='tel:+79522003990' style='color: <?=$accentCol?>; font-weight: 600;'>📞 +7 (952) 200-39-90</a> • 
-                <a href='mailto:artcopy78@bk.ru' style='color: <?=$accentCol?>; font-weight: 600;'>✉️ artcopy78@bk.ru</a>
+                <a href='tel:+79522003990' style='color: <?=esc($accentCol)?>; font-weight: 600;'>📞 +7 (952) 200-39-90</a> • 
+                <a href='mailto:artcopy78@bk.ru' style='color: <?=esc($accentCol)?>; font-weight: 600;'>✉️ artcopy78@bk.ru</a>
             </p>
         </div>
     </footer>
 
     <script>
         // Корзина
-        let cart = JSON.parse(localStorage.getItem('cart') || '[]');
+        let cart = [];
+
+        // Загружаем корзину из localStorage с проверкой
+        try {
+            const savedCart = localStorage.getItem('cart');
+            if (savedCart) {
+                const parsedCart = JSON.parse(savedCart);
+                if (Array.isArray(parsedCart)) {
+                    cart = parsedCart.filter(item => 
+                        item && 
+                        typeof item.id === 'number' && 
+                        typeof item.name === 'string' && 
+                        typeof item.price === 'number' && 
+                        typeof item.quantity === 'number' &&
+                        item.quantity > 0
+                    );
+                }
+            }
+        } catch (e) {
+            console.warn('Ошибка загрузки корзины:', e);
+            cart = [];
+        }
 
         function saveCart() {
-            localStorage.setItem('cart', JSON.stringify(cart));
+            try {
+                localStorage.setItem('cart', JSON.stringify(cart));
+            } catch (e) {
+                console.error('Ошибка сохранения корзины:', e);
+            }
+        }
+
+        function viewProduct(productId) {
+            window.location.href = `products.php?product=${productId}`;
         }
 
         function addToCart(button) {
-            const id = parseInt(button.dataset.id);
-            const name = button.dataset.name;
-            const price = parseInt(button.dataset.price);
-            const image = button.dataset.image;
-            const stock = parseInt(button.dataset.stock);
+            try {
+                const id = parseInt(button.dataset.id);
+                const name = button.dataset.name;
+                const price = parseFloat(button.dataset.price);
+                const image = button.dataset.image;
+                const stock = parseInt(button.dataset.stock);
 
-            const existingItem = cart.find(item => item.id === id);
-
-            if (existingItem) {
-                if (existingItem.quantity < stock) {
-                    existingItem.quantity++;
-                    showNotification(`Увеличено количество "${name}" в корзине`);
-                } else {
-                    showNotification('Недостаточно товара на складе', 'error');
+                // Валидация данных
+                if (!id || !name || !price || price <= 0 || !stock || stock <= 0) {
+                    showNotification('Ошибка данных товара', 'error');
                     return;
                 }
-            } else {
-                cart.push({
-                    id: id,
-                    name: name,
-                    price: price,
-                    image: image,
-                    quantity: 1,
-                    stock: stock
-                });
-                showNotification(`Товар "${name}" добавлен в корзину`);
-            }
 
-            saveCart();
-            updateCartUI();
+                const existingItem = cart.find(item => item.id === id);
+
+                if (existingItem) {
+                    if (existingItem.quantity < stock) {
+                        existingItem.quantity++;
+                        showNotification(`Увеличено количество "${name}" в корзине`);
+                    } else {
+                        showNotification('Недостаточно товара на складе', 'error');
+                        return;
+                    }
+                } else {
+                    cart.push({
+                        id: id,
+                        name: name,
+                        price: price,
+                        image: image,
+                        quantity: 1,
+                        stock: stock
+                    });
+                    showNotification(`Товар "${name}" добавлен в корзину`);
+                }
+
+                saveCart();
+                updateCartUI();
+            } catch (e) {
+                console.error('Ошибка добавления в корзину:', e);
+                showNotification('Ошибка добавления товара', 'error');
+            }
+        }
+
+        function addToCartDetail(button) {
+            try {
+                const id = parseInt(button.dataset.id);
+                const name = button.dataset.name;
+                const price = parseFloat(button.dataset.price);
+                const image = button.dataset.image;
+                const stock = parseInt(button.dataset.stock);
+                const quantity = parseInt(document.getElementById('productQty').value) || 1;
+
+                // Валидация данных
+                if (!id || !name || !price || price <= 0 || !stock || stock <= 0) {
+                    showNotification('Ошибка данных товара', 'error');
+                    return;
+                }
+
+                if (quantity <= 0 || quantity > stock) {
+                    showNotification('Некорректное количество', 'error');
+                    return;
+                }
+
+                const existingItem = cart.find(item => item.id === id);
+
+                if (existingItem) {
+                    if (existingItem.quantity + quantity <= stock) {
+                        existingItem.quantity += quantity;
+                        showNotification(`Добавлено ${quantity} шт. "${name}" в корзину`);
+                    } else {
+                        showNotification('Недостаточно товара на складе', 'error');
+                        return;
+                    }
+                } else {
+                    cart.push({
+                        id: id,
+                        name: name,
+                        price: price,
+                        image: image,
+                        quantity: quantity,
+                        stock: stock
+                    });
+                    showNotification(`Товар "${name}" (${quantity} шт) добавлен в корзину`);
+                }
+
+                saveCart();
+                updateCartUI();
+            } catch (e) {
+                console.error('Ошибка добавления в корзину:', e);
+                showNotification('Ошибка добавления товара', 'error');
+            }
+        }
+
+        function changeQty(delta) {
+            const qtyInput = document.getElementById('productQty');
+            if (!qtyInput) return;
+
+            const currentQty = parseInt(qtyInput.value) || 1;
+            const newQty = currentQty + delta;
+            const maxQty = parseInt(qtyInput.getAttribute('max')) || 999;
+
+            if (newQty >= 1 && newQty <= maxQty) {
+                qtyInput.value = newQty;
+            }
         }
 
         function removeFromCart(productId) {
-            cart = cart.filter(item => item.id !== productId);
-            saveCart();
-            updateCartUI();
+            try {
+                cart = cart.filter(item => item.id !== productId);
+                saveCart();
+                updateCartUI();
+                showNotification('Товар удален из корзины');
+            } catch (e) {
+                console.error('Ошибка удаления из корзины:', e);
+            }
         }
 
         function updateQuantity(productId, newQuantity) {
-            const item = cart.find(item => item.id === productId);
-            if (item) {
-                if (newQuantity > 0 && newQuantity <= item.stock) {
-                    item.quantity = newQuantity;
-                } else if (newQuantity <= 0) {
-                    removeFromCart(productId);
-                    return;
-                } else {
-                    showNotification('Недостаточно товара на складе', 'error');
-                    return;
+            try {
+                const item = cart.find(item => item.id === productId);
+                if (item) {
+                    newQuantity = parseInt(newQuantity);
+                    if (isNaN(newQuantity) || newQuantity < 0) {
+                        return;
+                    }
+
+                    if (newQuantity === 0) {
+                        removeFromCart(productId);
+                        return;
+                    }
+
+                    if (newQuantity <= item.stock) {
+                        item.quantity = newQuantity;
+                        saveCart();
+                        updateCartUI();
+                    } else {
+                        showNotification('Недостаточно товара на складе', 'error');
+                        updateCartUI(); // Обновляем UI для сброса неверного значения
+                    }
                 }
-                saveCart();
-                updateCartUI();
+            } catch (e) {
+                console.error('Ошибка обновления количества:', e);
             }
         }
 
         function updateCartUI() {
-            const cartCount = document.getElementById('cartCount');
-            const cartBody = document.getElementById('cartBody');
-            const cartTotal = document.getElementById('cartTotal');
-            const checkoutBtn = document.getElementById('checkoutBtn');
+            try {
+                const cartCount = document.getElementById('cartCount');
+                const floatingCartCount = document.getElementById('floatingCartCount');
+                const floatingCart = document.getElementById('floatingCart');
+                const cartBody = document.getElementById('cartBody');
+                const cartTotal = document.getElementById('cartTotal');
+                const checkoutBtn = document.getElementById('checkoutBtn');
 
-            const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
-            const totalPrice = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
+                const totalPrice = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
-            cartCount.textContent = totalItems;
-            cartTotal.textContent = 'Итого: ' + totalPrice.toLocaleString('ru-RU') + ' ₽';
+                cartCount.textContent = totalItems;
+                floatingCartCount.textContent = totalItems;
+                cartTotal.textContent = 'Итого: ' + totalPrice.toLocaleString('ru-RU') + ' ₽';
 
-            if (cart.length === 0) {
-                cartBody.innerHTML = `
-                    <div style='text-align: center; color: #6c757d; padding: 40px 20px;'>
-                        <div style='font-size: 48px; margin-bottom: 15px;'>🛒</div>
-                        <p>Корзина пуста</p>
-                        <small style='color: #adb5bd;'>Добавьте товары, чтобы сделать заказ</small>
-                    </div>
-                `;
-                checkoutBtn.disabled = true;
-            } else {
-                cartBody.innerHTML = cart.map(item => `
-                    <div class='cart-item'>
-                        <div class='cart-item-image'>
-                            ${item.image ? `<img src='uploads/${item.image}' alt='${item.name}'>` : '<div style="color: #adb5bd; font-size: 24px;">📦</div>'}
+                // Показываем плавающую корзину если есть товары
+                if (totalItems > 0) {
+                    floatingCart.classList.add('show');
+                } else {
+                    floatingCart.classList.remove('show');
+                }
+
+                if (cart.length === 0) {
+                    cartBody.innerHTML = `
+                        <div style='text-align: center; color: #6c757d; padding: 40px 20px;'>
+                            <div style='font-size: 48px; margin-bottom: 15px;'>🛒</div>
+                            <p>Корзина пуста</p>
+                            <small style='color: #adb5bd;'>Добавьте товары, чтобы сделать заказ</small>
                         </div>
-                        <div class='cart-item-info'>
-                            <div class='cart-item-title'>${item.name}</div>
-                            <div class='cart-item-price'>${item.price.toLocaleString('ru-RU')} ₽</div>
-                            <div class='cart-item-controls'>
-                                <button class='qty-btn' onclick='updateQuantity(${item.id}, ${item.quantity - 1})'>−</button>
-                                <input type='number' class='qty-input' value='${item.quantity}' min='1' max='${item.stock}'
-                                       onchange='updateQuantity(${item.id}, parseInt(this.value))'>
-                                <button class='qty-btn' onclick='updateQuantity(${item.id}, ${item.quantity + 1})'>+</button>
-                                <button class='remove-btn' onclick='removeFromCart(${item.id})'>🗑️</button>
+                    `;
+                    checkoutBtn.disabled = true;
+                } else {
+                    cartBody.innerHTML = cart.map(item => `
+                        <div class='cart-item'>
+                            <div class='cart-item-image'>
+                                ${item.image ? `<img src='uploads/${escapeHtml(item.image)}' alt='${escapeHtml(item.name)}'>` : '<div style="color: #adb5bd; font-size: 24px;">📦</div>'}
+                            </div>
+                            <div class='cart-item-info'>
+                                <div class='cart-item-title'>${escapeHtml(item.name)}</div>
+                                <div class='cart-item-price'>${item.price.toLocaleString('ru-RU')} ₽</div>
+                                <div class='cart-item-controls'>
+                                    <button class='qty-btn' onclick='updateQuantity(${item.id}, ${item.quantity - 1})'>−</button>
+                                    <input type='number' class='qty-input' value='${item.quantity}' min='1' max='${item.stock}'
+                                           onchange='updateQuantity(${item.id}, parseInt(this.value))'>
+                                    <button class='qty-btn' onclick='updateQuantity(${item.id}, ${item.quantity + 1})'>+</button>
+                                    <button class='remove-btn' onclick='removeFromCart(${item.id})' title='Удалить'>🗑️</button>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `).join('');
-                checkoutBtn.disabled = false;
+                    `).join('');
+                    checkoutBtn.disabled = false;
+                }
+            } catch (e) {
+                console.error('Ошибка обновления корзины:', e);
             }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         function toggleCart() {
@@ -780,25 +1476,30 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         function openCheckout() {
             if (cart.length === 0) return;
 
-            const modal = document.getElementById('checkoutModal');
-            const orderSummary = document.getElementById('orderSummary');
-            const orderTotal = document.getElementById('orderTotal');
-            const cartData = document.getElementById('cartData');
+            try {
+                const modal = document.getElementById('checkoutModal');
+                const orderSummary = document.getElementById('orderSummary');
+                const orderTotal = document.getElementById('orderTotal');
+                const cartData = document.getElementById('cartData');
 
-            const totalPrice = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                const totalPrice = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
-            orderSummary.innerHTML = cart.map(item => `
-                <div style='display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px;'>
-                    <span>${item.name} × ${item.quantity}</span>
-                    <span>${(item.price * item.quantity).toLocaleString('ru-RU')} ₽</span>
-                </div>
-            `).join('');
+                orderSummary.innerHTML = cart.map(item => `
+                    <div style='display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px;'>
+                        <span>${escapeHtml(item.name)} × ${item.quantity}</span>
+                        <span>${(item.price * item.quantity).toLocaleString('ru-RU')} ₽</span>
+                    </div>
+                `).join('');
 
-            orderTotal.textContent = 'Итого: ' + totalPrice.toLocaleString('ru-RU') + ' ₽';
-            cartData.value = JSON.stringify(cart);
+                orderTotal.textContent = 'Итого: ' + totalPrice.toLocaleString('ru-RU') + ' ₽';
+                cartData.value = JSON.stringify(cart);
 
-            modal.classList.add('show');
-            closeCart();
+                modal.classList.add('show');
+                closeCart();
+            } catch (e) {
+                console.error('Ошибка открытия оформления:', e);
+                showNotification('Ошибка открытия формы заказа', 'error');
+            }
         }
 
         function closeCheckout() {
@@ -810,17 +1511,36 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         function showNotification(message, type = 'success') {
             const notification = document.createElement('div');
             notification.className = 'notification';
+            if (type === 'error') notification.classList.add('error');
             notification.textContent = message;
-
-            if (type === 'error') {
-                notification.style.background = '#dc3545';
-            }
 
             document.body.appendChild(notification);
 
             setTimeout(() => {
                 notification.remove();
             }, 3000);
+        }
+
+        // Табы для детального просмотра товара
+        function switchTab(tabName) {
+            // Скрываем все табы
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+
+            // Убираем активность у всех кнопок
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Показываем нужный таб
+            const targetTab = document.getElementById('tab-' + tabName);
+            if (targetTab) {
+                targetTab.classList.add('active');
+            }
+
+            // Активируем нужную кнопку
+            event.target.classList.add('active');
         }
 
         // Отправка заказа
@@ -831,15 +1551,32 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
             const submitBtn = e.target.querySelector('button[type="submit"]');
 
             status.textContent = 'Отправляем заказ...';
-            status.style.color = '<?=$accentCol?>';
+            status.style.color = '<?=esc($accentCol)?>';
             submitBtn.disabled = true;
 
             try {
                 const formData = new FormData(e.target);
+
+                // Валидация на клиенте
+                const name = formData.get('name')?.trim();
+                const phone = formData.get('phone')?.trim();
+
+                if (!name || name.length < 2) {
+                    throw new Error('Укажите корректное имя');
+                }
+
+                if (!phone || phone.length < 10) {
+                    throw new Error('Укажите корректный телефон');
+                }
+
                 const response = await fetch(window.location.href, {
                     method: 'POST',
                     body: formData
                 });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
 
                 const result = await response.json();
 
@@ -864,16 +1601,66 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
                         showNotification('Заказ успешно отправлен!');
                     }, result.payment ? 3000 : 2000);
                 } else {
-                    status.textContent = '❌ ' + result.message;
+                    status.textContent = '❌ ' + (result.message || 'Ошибка сервера');
                     status.style.color = '#dc3545';
                 }
             } catch (error) {
-                status.textContent = '❌ Ошибка соединения. Попробуйте еще раз.';
+                console.error('Ошибка отправки заказа:', error);
+                status.textContent = '❌ ' + (error.message || 'Ошибка соединения. Попробуйте еще раз.');
                 status.style.color = '#dc3545';
             } finally {
                 submitBtn.disabled = false;
             }
         });
+
+        // Отправка отзыва
+        const reviewForm = document.getElementById('reviewForm');
+        if (reviewForm) {
+            reviewForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const status = document.getElementById('reviewStatus');
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+
+                status.textContent = 'Отправляем отзыв...';
+                status.style.color = '<?=esc($accentCol)?>';
+                submitBtn.disabled = true;
+
+                try {
+                    const formData = new FormData(e.target);
+
+                    const response = await fetch(window.location.href, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const result = await response.json();
+
+                    if (result.ok) {
+                        status.textContent = '✅ ' + result.message;
+                        status.style.color = '#28a745';
+                        e.target.reset();
+
+                        setTimeout(() => {
+                            status.textContent = '';
+                        }, 3000);
+                    } else {
+                        status.textContent = '❌ ' + (result.message || 'Ошибка сервера');
+                        status.style.color = '#dc3545';
+                    }
+                } catch (error) {
+                    console.error('Ошибка отправки отзыва:', error);
+                    status.textContent = '❌ ' + (error.message || 'Ошибка соединения.');
+                    status.style.color = '#dc3545';
+                } finally {
+                    submitBtn.disabled = false;
+                }
+            });
+        }
 
         // Закрытие модальных окон
         document.getElementById('checkoutModal').addEventListener('click', (e) => {
@@ -897,6 +1684,22 @@ $accentCol = $T['accent'] ?? '#2D5BFF';
         document.addEventListener('DOMContentLoaded', function() {
             updateCartUI();
             console.log('Корзина инициализирована, товаров:', cart.length);
+
+            // Инициализация звездочек в форме отзывов
+            const ratingInputs = document.querySelectorAll('.rating-input input[type="radio"]');
+            ratingInputs.forEach(input => {
+                input.addEventListener('change', function() {
+                    const value = this.value;
+                    const labels = this.parentNode.querySelectorAll('label');
+                    labels.forEach((label, index) => {
+                        if (index >= (5 - value)) {
+                            label.style.color = '#ffc107';
+                        } else {
+                            label.style.color = '#ddd';
+                        }
+                    });
+                });
+            });
         });
     </script>
 </body>
